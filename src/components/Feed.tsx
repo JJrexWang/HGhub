@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, cover, fmt, fmtTime, mediaUrl, platform } from "../api";
+import { api, cover, fmt, fmtTime, localPlayUrl, mediaUrl, platform } from "../api";
 import type { Detail, Episode, Post, VideoCard } from "../types";
 import { useStore } from "../store";
 import { Avatar, Img, Sheet } from "./ui";
@@ -9,7 +9,7 @@ import { ArticlePanel, CommentsPanel, EpisodesPanel } from "./Panels";
 import { sanitizeHtml } from "../html";
 import { setBackHandler } from "../back";
 import {
-  IBack, IBoltF, IChevR, IChevronDown, IChevronUp, IClose, ICommentF, ICompress, IExpand, IFileText, IHeart, IHeartF,
+  IBack, IBoltF, ICheck, IChevR, IChevronDown, IChevronUp, IClose, ICommentF, ICompress, IDownload, IExpand, IFileText, IHeart, IHeartF,
   ILink, IList, ILockF, IPauseF, IPlayF, IStar, IStarF, IVol, IVolMute,
 } from "../icons";
 
@@ -34,7 +34,7 @@ const stripHtml = (s: string) => s.replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, "
 
 export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind = "video", active, bottomInset, onBack, onNearEnd, startEp, startTime }: Props) {
   const store = useStore();
-  const { isLiked, isFav, toggleLikeLocal, toggleFavLocal, toggleFollowLocal, muted, setMuted, volume, setVolume, toast, addHistory, user, setLoginOpen } = store;
+  const { isLiked, isFav, toggleLikeLocal, toggleFavLocal, toggleFollowLocal, muted, setMuted, volume, setVolume, toast, addHistory, user, setLoginOpen, downloads, dlOf, push } = store;
   const isDesktop = platform !== "android";
 
   const boxRef = useRef<HTMLDivElement>(null);
@@ -108,6 +108,9 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
   const curEp = epMap[curId] || 1;
   const playKey = `${curId}:${curEp}`;
   const playUrl = playUrls[playKey] || "";
+  /** 本集已下载 → 优先本地供流（离线可播），不打播放接口 */
+  const localTask = kind === "video" ? dlOf(curId, curEp) : undefined;
+  const localDone = localTask?.status === "done" ? localTask : undefined;
   const episodes = detail?.episodes || [];
   const post = posts[curId];
 
@@ -232,10 +235,15 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kind, index, videoIds]);
 
-  /* 拉播放地址 */
+  /* 拉播放地址（已下载的集直接用本地地址） */
   useEffect(() => {
     if (!curId) return;
     if (playUrls[playKey]) return;
+    if (localDone) {
+      setPlayUrls((m) => ({ ...m, [playKey]: localPlayUrl(localDone) }));
+      addHistory(curId, curEp);
+      return;
+    }
     let alive = true;
     api.play(curId, curEp)
       .then((info) => {
@@ -247,7 +255,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
       .catch((e) => { if (alive) setErr((e as Error).message || "取播放地址失败"); });
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [curId, curEp]);
+  }, [curId, curEp, localDone]);
 
   /* 切换条目/集数时重置播放状态 */
   useEffect(() => {
@@ -482,6 +490,31 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
     if (requireLogin()) { if (kind === "post") api.postCollect(curId, on).catch(() => {}); else api.collect(curId, on).catch(() => {}); }
   };
 
+  /* 下载本集：没有任务→入队；排队/下载中→去管理页；暂停/失败→续传；已完成→提示 */
+  const onDownload = () => {
+    if (!curId || kind !== "video") return;
+    const t = dlOf(curId, curEp);
+    if (!t) {
+      api.dlEnqueue(curId, curEp)
+        .then(() => toast(`第 ${curEp} 集已加入下载队列`, "ok"))
+        .catch((e) => toast((e as Error).message || "加入下载失败", "info"));
+      return;
+    }
+    if (t.status === "done") { toast("本集已下载，在「我的 → 下载」里管理", "ok"); return; }
+    if (t.status === "paused" || t.status === "failed" || t.status === "canceled") {
+      api.dlResume(t.id).then(() => toast("已继续下载", "ok")).catch(() => {});
+      return;
+    }
+    push({ kind: "downloads" });
+  };
+
+  const dlLabel = !localTask ? "下载"
+    : localTask.status === "done" ? "已下载"
+    : localTask.status === "downloading" ? (localTask.segs_total ? `${Math.floor((localTask.segs_done / localTask.segs_total) * 100)}%` : "下载中")
+    : localTask.status === "queued" ? "排队中"
+    : localTask.status === "failed" ? "重试"
+    : "继续";
+
   const onFollow = () => {
     const uid = meta.authorId > 0 ? meta.authorId : undefined;
     if (!uid) return;
@@ -591,6 +624,14 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
                     <ICommentF size={26} className="hg-ink hg-ov-shadow" />
                     <span className="text-[10.5px] hg-ink-2 hg-ov-shadow">评论</span>
                   </button>
+                  {kind === "video" && (
+                    <button onClick={onDownload} className="flex flex-col items-center gap-1 pressable" aria-label="下载本集">
+                      {localTask?.status === "done"
+                        ? <ICheck size={26} className="text-mint hg-ov-shadow" />
+                        : <IDownload size={26} className="hg-ink hg-ov-shadow" />}
+                      <span className="text-[10.5px] hg-ink-2 hg-ov-shadow">{dlLabel}</span>
+                    </button>
+                  )}
                   <button onClick={() => setFs(true)} className="flex flex-col items-center gap-1 pressable" aria-label="全屏">
                     <IExpand size={26} className="hg-ink hg-ov-shadow" />
                     <span className="text-[10.5px] hg-ink-2 hg-ov-shadow">全屏</span>
@@ -634,6 +675,13 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
                       <span className="text-[10.5px] text-white/90 tabular-nums">{fmt(meta.collect)}</span>
                     </button>
 
+                    <button onClick={onDownload} className="flex flex-col items-center gap-1 pressable" aria-label="下载本集">
+                      {localTask?.status === "done"
+                        ? <ICheck size={27} className="text-mint" />
+                        : <IDownload size={27} className="text-white tsh" />}
+                      <span className="text-[10.5px] text-white/90">{dlLabel}</span>
+                    </button>
+
                     <button onClick={() => setPanel("episodes")} className="flex flex-col items-center gap-1 pressable">
                       <IList size={26} className="text-white tsh" />
                       <span className="text-[10.5px] text-white/90">选集</span>
@@ -657,6 +705,12 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
                     <span className="shrink-0 px-1.5 py-px rounded-md text-[10px] font-bold text-white"
                       style={{ background: "rgba(255,255,255,.16)" }}>
                       第 {curEp}/{episodes.length} 集
+                    </span>
+                  )}
+                  {localDone && (
+                    <span className="shrink-0 px-1.5 py-px rounded-md text-[10px] font-bold text-white"
+                      style={{ background: "rgba(46,160,90,.55)" }}>
+                      离线
                     </span>
                   )}
                   {!!meta.score && (

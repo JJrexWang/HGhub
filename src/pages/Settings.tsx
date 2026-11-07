@@ -1,14 +1,19 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { api, APP_VERSION, hostOf, logLine, platform, type UpdateInfo } from "../api";
+import { api, APP_VERSION, fmtBytes, hostOf, logLine, platform, type UpdateInfo } from "../api";
 import { useStore } from "../store";
 import { Modal, Toggle } from "../components/ui";
 import LinePicker from "../components/LinePicker";
-import { IBack, IBoltF, IBroom, IChevR, IHeart, IInfo, ILink, IMoon, IRefresh, ISettings, ISun } from "../icons";
+import { IBack, IBoltF, IBroom, IChevR, IDownload, IHeart, IInfo, ILink, IMoon, IRefresh, ISettings, ISun } from "../icons";
 
 /* 独立设置页：线路 / 外观 / 本地数据 / 清理缓存 / 网络诊断 / 关于
    入口：Windows 侧栏「设置」、Android「我的」右上角齿轮 */
 export default function Settings({ onBack, wide }: { onBack: () => void; wide: boolean }) {
-  const { theme, setTheme, favs, history, toast } = useStore();
+  const { theme, setTheme, favs, history, toast, downloads, push } = useStore();
+  const [dlRoot, setDlRoot] = useState("");
+  useEffect(() => { api.dlStats().then((s) => setDlRoot(s.root)).catch(() => {}); }, []);
+  const dlDone = downloads.filter((t) => t.status === "done");
+  const dlBytes = dlDone.reduce((s, t) => s + t.size, 0);
+  const dlActiveN = downloads.filter((t) => t.status === "downloading" || t.status === "queued").length;
   const [about, setAbout] = useState(false);
   const [clearOpen, setClearOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
@@ -89,6 +94,36 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
               </div>
               <IChevR size={15} className="text-mut" />
             </button>
+          </Section>
+
+          <Section title="下载">
+            <button onClick={() => push({ kind: "downloads" })} className="w-full flex items-center gap-3 px-3.5 py-3 text-left pressable">
+              <span className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-primary"><IDownload size={16} /></span>
+              <div className="flex-1 min-w-0">
+                <div className="text-[12.5px] text-on">下载管理</div>
+                <div className="text-[10.5px] text-mut truncate">
+                  已下载 {dlDone.length} 集 · {fmtBytes(dlBytes)}{dlActiveN ? ` · ${dlActiveN} 个进行中` : ""}
+                </div>
+              </div>
+              <IChevR size={15} className="text-mut" />
+            </button>
+            {platform !== "android" && (
+              <button onClick={() => { api.dlOpenDir().catch((e) => toast((e as Error).message || "打开失败", "info")); }} className="w-full flex items-center gap-3 px-3.5 py-3 text-left pressable">
+                <span className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-primary"><ILink size={16} /></span>
+                <div className="flex-1 min-w-0">
+                  <div className="text-[12.5px] text-on">打开下载目录</div>
+                  <div className="text-[10.5px] text-mut truncate">{dlRoot || "应用数据目录 / downloads"}</div>
+                </div>
+                <IChevR size={15} className="text-mut" />
+              </button>
+            )}
+            <div className="flex items-center gap-3 px-3.5 py-3">
+              <span className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-primary"><IInfo size={16} /></span>
+              <div className="flex-1">
+                <div className="text-[12.5px] text-on">命名规则</div>
+                <div className="text-[10.5px] text-mut">按作品建文件夹，文件名为「作品名 - 第NN集」，在下载管理里可播放、删除与批量清理</div>
+              </div>
+            </div>
           </Section>
 
           <Section title="网络">

@@ -125,7 +125,7 @@ fn dec(s: &str) -> String {
     percent_decode_str(s).decode_utf8_lossy().to_string()
 }
 
-fn absolutize(base: &str, target: &str) -> String {
+pub(crate) fn absolutize(base: &str, target: &str) -> String {
     if target.starts_with("http://") || target.starts_with("https://") {
         return target.to_string();
     }

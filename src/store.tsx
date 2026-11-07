@@ -1,6 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { api, platform as envPlatform } from "./api";
-import type { User } from "./types";
+import type { DlTask, User } from "./types";
 
 export type Platform = "android" | "windows" | "macos";
 export type Theme = "dark" | "light";
@@ -25,6 +26,7 @@ export type Page =
   | { kind: "channel"; key: string; cate: string; name: string }
   | { kind: "ranks"; key: string }
   | { kind: "settings"; key: string }
+  | { kind: "downloads"; key: string }
   | { kind: "posts"; key: string }
   | { kind: "post"; key: string; id: number };
 
@@ -33,6 +35,7 @@ export type PageInput =
   | { kind: "channel"; cate: string; name: string }
   | { kind: "ranks" }
   | { kind: "settings" }
+  | { kind: "downloads" }
   | { kind: "posts" }
   | { kind: "post"; id: number };
 
@@ -120,6 +123,10 @@ type Store = {
   volume: number; setVolume: (v: number) => void;
   searchHist: string[]; addSearch: (q: string) => void; clearSearchHist: () => void;
   toasts: Toast[]; toast: (msg: string, icon?: Toast["icon"]) => void;
+  /* 下载（状态在 Rust 侧，这里是镜像：启动拉一次 + download-changed 事件增量替换） */
+  downloads: DlTask[];
+  refreshDownloads: () => Promise<void>;
+  dlOf: (videoId: number, ep: number) => DlTask | undefined;
 };
 
 const Ctx = createContext<Store>(null as unknown as Store);
@@ -134,6 +141,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loginOpen, setLoginOpen] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [downloads, setDownloads] = useState<DlTask[]>([]);
   const [theater, setTheaterState] = useState(false);
   const [fs, setFsState] = useState(false);
   const toastSeq = useRef(0);
@@ -152,6 +160,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       .then((r) => { if (r.user && (r.user as User).id) setUser(r.user as User); })
       .catch(() => { /* 离线也能用 */ });
   }, []);
+
+  const refreshDownloads = useCallback(async () => {
+    try { setDownloads(await api.dlList()); } catch { /* 下载模块未就绪时忽略 */ }
+  }, []);
+
+  useEffect(() => {
+    refreshDownloads();
+    let un: (() => void) | undefined;
+    listen<DlTask[]>("download-changed", (e) => setDownloads(e.payload || []))
+      .then((f) => { un = f; })
+      .catch(() => {});
+    return () => { un?.(); };
+  }, [refreshDownloads]);
 
   const toast = useCallback((msg: string, icon?: Toast["icon"]) => {
     const id = ++toastSeq.current;
@@ -246,9 +267,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     muted: p.muted, setMuted, volume: p.volume, setVolume, theater, setTheater, fs, setFs,
     searchHist: p.searchHist, addSearch, clearSearchHist,
     toasts, toast,
+    downloads, refreshDownloads,
+    dlOf: (videoId: number, ep: number) => downloads.find((t) => t.video_id === videoId && t.ep === ep),
   }), [theme, tab, setTab, stack, push, pop, user, loginOpen, logout,
     p, toggleLikeLocal, toggleFavLocal, toggleFollowLocal, addHistory, clearHistory,
-    setMuted, setVolume, addSearch, clearSearchHist, toasts, toast, theater, setTheater, fs, setFs]);
+    setMuted, setVolume, addSearch, clearSearchHist, toasts, toast, theater, setTheater, fs, setFs,
+    downloads, refreshDownloads]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

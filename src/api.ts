@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
-  CommentPage, Detail, Paged, PlayInfo, Post, RankItem, User, VideoCard,
+  CommentPage, Detail, DlStats, DlTask, Paged, PlayInfo, Post, RankItem, User, VideoCard,
 } from "./types";
 
 /* ── 运行环境 ───────────────────────────────────────────── */
@@ -94,6 +94,40 @@ export const api = {
   /* 更新检查：对比 GitHub Release 的 tag */
   checkUpdate: () => call<UpdateInfo>("check_update"),
   openUrl: (url: string) => call<void>("open_url", { url }),
+
+  /* 下载（Rust 侧 DownloadManager；状态变化经 download-changed 事件推回） */
+  dlList: () => call<DlTask[]>("dl_list"),
+  dlEnqueue: (videoId: number, ep: number) => call<DlTask>("dl_enqueue", { videoId, ep }),
+  dlEnqueueSeries: (videoId: number, eps?: number[]) =>
+    call<DlTask[]>("dl_enqueue_series", { videoId, eps: eps ?? null }),
+  dlPause: (id: string) => call<void>("dl_pause", { id }),
+  dlResume: (id: string) => call<void>("dl_resume", { id }),
+  dlCancel: (id: string) => call<void>("dl_cancel", { id }),
+  dlRemove: (id: string) => call<void>("dl_remove", { id }),
+  dlRemoveWork: (videoId: number) => call<void>("dl_remove_work", { videoId }),
+  dlStats: () => call<DlStats>("dl_stats"),
+  dlOpenDir: () => call<void>("dl_open_dir"),
+};
+
+/** 已下载视频的本地播放列表（TS 成品经 hls.js 转封装播放） */
+export const localPlaylist = (videoId: number, ep: number) =>
+  `${LOCAL}/local?v=${videoId}&e=${ep}`;
+
+/** 已下载视频的成品文件直链（mp4 成品用 video 元素直读，支持 Range） */
+export const localFile = (videoId: number, ep: number) =>
+  `${LOCAL}/localfile?v=${videoId}&e=${ep}`;
+
+/** 按任务的成品格式选本地播放地址 */
+export const localPlayUrl = (t: { video_id: number; ep: number; format?: string | null }) =>
+  t.format === "mp4" ? localFile(t.video_id, t.ep) : localPlaylist(t.video_id, t.ep);
+
+/** 字节数格式化（下载管理用） */
+export const fmtBytes = (n: number | undefined) => {
+  const v = Number(n) || 0;
+  if (v >= 1e9) return `${(v / 1e9).toFixed(2)} GB`;
+  if (v >= 1e6) return `${(v / 1e6).toFixed(1)} MB`;
+  if (v >= 1e3) return `${(v / 1e3).toFixed(1)} KB`;
+  return `${v} B`;
 };
 
 /* ── 更新检查 ───────────────────────────────────────────── */

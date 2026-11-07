@@ -68,7 +68,9 @@ const VideoSurface = forwardRef<VideoHandle, Props>(function VideoSurface(
 
     const proxied = isLocalMedia(src);
     const url = proxied ? src : playlist(src);
-    const useHls = !url.includes("/seg?u=");
+    /* 本地成品文件（/localfile）是完整 mp4/ts 文件本体：mp4 由 video 元素直读，不走 hls.js；
+       ts 成品走的是 /local 生成的单分片播放列表，仍归 hls.js 转封装。 */
+    const useHls = !url.includes("/seg?u=") && !url.includes("/localfile?");
 
     /* 换源时先把音量/倍速套回去：hls 重新 attach 后浏览器会把它们重置成默认值 */
     const applySettings = () => {

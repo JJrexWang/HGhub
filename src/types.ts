@@ -116,6 +116,33 @@ export type Post = {
   publish_time?: string;
 };
 
+/** 下载任务（Rust 侧 downloads.json 的一条，与 src-tauri/src/download.rs 的 DlTask 对齐） */
+export type DlTask = {
+  id: string;
+  video_id: number;
+  ep: number;
+  title: string;
+  ep_title: string;
+  total_episodes: number;
+  duration: number;
+  cover: string;
+  status: "queued" | "downloading" | "paused" | "done" | "failed" | "canceled";
+  file_name?: string | null;
+  rel_path?: string | null;
+  format?: string | null;
+  size: number;
+  segs_done: number;
+  segs_total: number;
+  bytes_done: number;
+  error?: string | null;
+  created_at: number;
+  finished_at: number;
+};
+
+export type DlStats = {
+  total: number; done: number; active: number; failed: number; bytes: number; root: string;
+};
+
 export type User = {
   id: number;
   username: string;
