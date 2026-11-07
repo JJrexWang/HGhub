@@ -3,6 +3,7 @@ mod download;
 mod lines;
 mod media;
 mod net;
+mod remux;
 mod session;
 
 use api::Api;
@@ -139,6 +140,9 @@ pub fn run() {
             download::dl_remove_work,
             download::dl_stats,
             download::dl_open_dir,
+            download::dl_get_remux_pref,
+            download::dl_set_remux_pref,
+            download::dl_remux,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -11,6 +11,8 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
   const { theme, setTheme, favs, history, toast, downloads, push } = useStore();
   const [dlRoot, setDlRoot] = useState("");
   useEffect(() => { api.dlStats().then((s) => setDlRoot(s.root)).catch(() => {}); }, []);
+  const [remuxOn, setRemuxOn] = useState(false);
+  useEffect(() => { api.dlGetRemuxPref().then(setRemuxOn).catch(() => {}); }, []);
   const dlDone = downloads.filter((t) => t.status === "done");
   const dlBytes = dlDone.reduce((s, t) => s + t.size, 0);
   const dlActiveN = downloads.filter((t) => t.status === "downloading" || t.status === "queued").length;
@@ -117,6 +119,14 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
                 <IChevR size={15} className="text-mut" />
               </button>
             )}
+            <div className="flex items-center gap-3 px-3.5 py-3">
+              <span className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-primary"><IRefresh size={16} /></span>
+              <div className="flex-1">
+                <div className="text-[12.5px] text-on">下载后转 MP4</div>
+                <div className="text-[10.5px] text-mut">TS 源下完自动无损换封装为 MP4，不重新编码、画质不变；失败时保留原始 TS。已下载的集可在下载管理里单独转</div>
+              </div>
+              <Toggle on={remuxOn} label="下载后转 MP4" onChange={(v) => { setRemuxOn(v); api.dlSetRemuxPref(v).catch(() => {}); }} />
+            </div>
             <div className="flex items-center gap-3 px-3.5 py-3">
               <span className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-primary"><IInfo size={16} /></span>
               <div className="flex-1">

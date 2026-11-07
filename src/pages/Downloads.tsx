@@ -27,6 +27,7 @@ export default function Downloads({ onBack, wide }: { onBack: () => void; wide: 
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [confirm, setConfirm] = useState<{ text: string; run: () => void } | null>(null);
+  const [converting, setConverting] = useState<string | null>(null);
 
   const act = (p: Promise<unknown>, okMsg?: string) => {
     p.then(() => { if (okMsg) toast(okMsg, "ok"); refreshDownloads(); })
@@ -194,6 +195,18 @@ export default function Downloads({ onBack, wide }: { onBack: () => void; wide: 
                           <button onClick={() => playTask(t)} className="flex items-center gap-1 h-8 px-2.5 rounded-(--r-ctl) bg-s3 text-[11px] text-on pressable">
                             <IPlayF size={12} />播放
                           </button>
+                          {t.format === "ts" && !selectMode && (
+                            <button disabled={converting === t.id}
+                              onClick={() => {
+                                setConverting(t.id);
+                                const p = api.dlRemux(t.id);
+                                act(p, "已无损转为 MP4");
+                                p.then(() => setConverting(null), () => setConverting(null));
+                              }}
+                              className="flex items-center gap-1 h-8 px-2.5 rounded-(--r-ctl) bg-s3 text-[11px] text-on pressable disabled:opacity-50">
+                              {converting === t.id ? "转换中…" : "转 MP4"}
+                            </button>
+                          )}
                           {!selectMode && (
                             <button onClick={() => setConfirm({ text: `删除文件「${t.file_name || `第 ${t.ep} 集`}」？`, run: () => act(api.dlRemove(t.id), "已删除") })}
                               aria-label="删除本集" className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-mut pressable"><ITrash size={14} /></button>

@@ -181,6 +181,10 @@ pub struct DownloadManager {
     flags: Mutex<HashMap<String, Arc<AtomicU8>>>,
     worker_alive: Mutex<bool>,
     app: Mutex<Option<AppHandle>>,
+    /// 下载完成后自动无损换封装为 MP4（仅 TS 源），持久化在 downloads/prefs.json
+    remux_pref: Mutex<bool>,
+    /// 正在转换中的任务 id（防重复触发）
+    remuxing: Mutex<std::collections::HashSet<String>>,
 }
 
 impl DownloadManager {
@@ -192,6 +196,8 @@ impl DownloadManager {
             flags: Mutex::new(HashMap::new()),
             worker_alive: Mutex::new(false),
             app: Mutex::new(None),
+            remux_pref: Mutex::new(false),
+            remuxing: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -222,10 +228,28 @@ impl DownloadManager {
             }
         }
         *self.tasks.lock().unwrap() = loaded;
+        // 换封装偏好（与索引同目录的 prefs.json）
+        let pref_on = std::fs::read_to_string(root.join("prefs.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .and_then(|v| v.get("remux_mp4").and_then(|b| b.as_bool()))
+            .unwrap_or(false);
+        *self.remux_pref.lock().unwrap() = pref_on;
         *self.root.lock().unwrap() = Some(root);
         *self.legacy_root.lock().unwrap() = legacy_dl;
         *self.app.lock().unwrap() = Some(app);
         self.persist();
+    }
+
+    pub fn remux_pref(&self) -> bool {
+        *self.remux_pref.lock().unwrap()
+    }
+
+    pub fn set_remux_pref(&self, on: bool) {
+        *self.remux_pref.lock().unwrap() = on;
+        if let Some(root) = self.root() {
+            let _ = std::fs::write(root.join("prefs.json"), json!({ "remux_mp4": on }).to_string());
+        }
     }
 
     pub fn root(&self) -> Option<PathBuf> {
@@ -914,6 +938,82 @@ async fn run_task(app: &AppHandle, mgr: &DownloadManager, id: &str) {
         t.finished_at = done_at;
         t.error = None;
     });
+
+    // 自动换封装：源为 TS 且设置开启时，把成品无损转成 MP4；失败保留 TS 并记诊断日志
+    if !is_mp4 && mgr.remux_pref() {
+        let app2 = app.clone();
+        let id2 = id.to_string();
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            let dl = app2.state::<DownloadManager>();
+            if let Err(e) = do_remux(&dl, &id2) {
+                let dir = crate::data_root(app2.path().app_data_dir().ok());
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("debug.log")) {
+                    let _ = writeln!(f, "auto remux {id2} failed: {e}");
+                }
+            }
+        });
+    }
+}
+
+/// 把已完成任务的 TS 成品无损换封装为 MP4（同目录同主名），成功后更新索引并删原 TS。
+/// 转换在临时名上完成、校验通过才改名替换，任何失败都保留原始 TS。
+fn do_remux(mgr: &DownloadManager, id: &str) -> Result<(), String> {
+    let task = mgr
+        .list()
+        .into_iter()
+        .find(|t| t.id == id)
+        .ok_or_else(|| "任务不存在".to_string())?;
+    if task.status != ST_DONE {
+        return Err("只有已完成的下载可以转换".into());
+    }
+    if task.format.as_deref() != Some("ts") {
+        return Err("该集不是 TS 格式，无需转换".into());
+    }
+    let rel = task.rel_path.clone().ok_or_else(|| "缺少成品路径".to_string())?;
+    let src = mgr.resolve_file(&rel).ok_or_else(|| "找不到成品文件".to_string())?;
+    if !src.is_file() {
+        return Err("成品文件不存在".into());
+    }
+    {
+        let mut ing = mgr.remuxing.lock().unwrap();
+        if !ing.insert(id.to_string()) {
+            return Err("正在转换中".into());
+        }
+    }
+    let result = (|| -> Result<u64, String> {
+        let tmp = src.with_extension("mp4.tmp");
+        let dst = src.with_extension("mp4");
+        if let Err(e) = crate::remux::remux_ts_to_mp4(&src, &tmp) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+        let size = std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
+        if size == 0 {
+            let _ = std::fs::remove_file(&tmp);
+            return Err("转换产物为空".into());
+        }
+        std::fs::rename(&tmp, &dst).map_err(|e| format!("成品改名失败：{e}"))?;
+        let _ = std::fs::remove_file(&src);
+        Ok(size)
+    })();
+    mgr.remuxing.lock().unwrap().remove(id);
+    let size = result?;
+    let new_name = task.file_name.clone().map(|n| {
+        n.rsplit_once('.').map(|(stem, _)| format!("{stem}.mp4")).unwrap_or_else(|| format!("{n}.mp4"))
+    });
+    let new_rel = rel
+        .rsplit_once('.')
+        .map(|(stem, _)| format!("{stem}.mp4"))
+        .unwrap_or_else(|| format!("{rel}.mp4"));
+    mgr.update(id, |t| {
+        t.file_name = new_name.clone();
+        t.rel_path = Some(new_rel.clone());
+        t.format = Some("mp4".to_string());
+        t.size = size;
+        t.bytes_done = size;
+    });
+    Ok(())
 }
 
 /* ───────────────────────── Tauri 命令 ───────────────────────── */
@@ -1161,6 +1261,47 @@ pub async fn dl_open_dir(dl: State<'_, DownloadManager>) -> Result<(), String> {
     let _ = std::fs::create_dir_all(&root);
     let path = root.to_string_lossy().to_string();
     open_path(&path)
+}
+
+#[tauri::command]
+pub async fn dl_get_remux_pref(dl: State<'_, DownloadManager>) -> Result<bool, String> {
+    Ok(dl.remux_pref())
+}
+
+#[tauri::command]
+pub async fn dl_set_remux_pref(dl: State<'_, DownloadManager>, enabled: bool) -> Result<(), String> {
+    dl.set_remux_pref(enabled);
+    Ok(())
+}
+
+/// 手动把一集已下载的 TS 转成 MP4（无损换封装）。转换在阻塞线程池里跑，完成后返回最新任务。
+#[tauri::command]
+pub async fn dl_remux(app: AppHandle, dl: State<'_, DownloadManager>, id: String) -> Result<DlTask, String> {
+    {
+        let t = dl
+            .list()
+            .into_iter()
+            .find(|t| t.id == id)
+            .ok_or_else(|| "任务不存在".to_string())?;
+        if t.status != ST_DONE {
+            return Err("只有已完成的下载可以转换".into());
+        }
+        if t.format.as_deref() != Some("ts") {
+            return Err("该集不是 TS 格式，无需转换".into());
+        }
+    }
+    let app2 = app.clone();
+    let id2 = id.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let dl = app2.state::<DownloadManager>();
+        do_remux(&dl, &id2)
+    })
+    .await
+    .map_err(|e| format!("转换任务异常：{e}"))??;
+    dl.list()
+        .into_iter()
+        .find(|t| t.id == id)
+        .ok_or_else(|| "任务不存在".to_string())
 }
 
 #[cfg(target_os = "windows")]

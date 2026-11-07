@@ -109,6 +109,9 @@ export const api = {
   dlRemoveWork: (videoId: number) => call<void>("dl_remove_work", { videoId }),
   dlStats: () => call<DlStats>("dl_stats"),
   dlOpenDir: () => call<void>("dl_open_dir"),
+  dlGetRemuxPref: () => call<boolean>("dl_get_remux_pref"),
+  dlSetRemuxPref: (enabled: boolean) => call<void>("dl_set_remux_pref", { enabled }),
+  dlRemux: (id: string) => call<DlTask>("dl_remux", { id }),
 };
 
 /** 已下载视频的本地播放列表（TS 成品经 hls.js 转封装播放） */
