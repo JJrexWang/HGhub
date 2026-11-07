@@ -77,9 +77,39 @@ function normalizeHistory(raw: unknown): WatchProgress[] {
   return out;
 }
 
-/** 网站收藏接口的返回归一化：兼容 {items:[...]} / 裸数组，
- *  条目兼容 VideoCard 本体、{video_id,...} 与 {video:{...}} 三种形状。 */
-function normalizeCollects(res: unknown): { items: FavCard[]; total: number | null } {
+/** 收藏条目里可能指向视频的 id 来源（同一接口内形状统一，定下命中来源即可全量套用） */
+type IdSrc = "video_id" | "nested" | "own";
+type CollectItem = { cands: { src: IdSrc; id: number }[]; title: string; cover: string };
+
+/** 解析一条网站收藏。关键：这家 API 的约定是 `video_id` 才是指向视频的字段，
+ *  条目自身的 `id` 是「收藏记录」的 id——热榜、帖子条目同理。拿记录 id 去取详情/播放
+ *  会报「视频不存在」：网格的标题封面都取自记录本身，所以列表能显示、点开却播不了。
+ *  嵌套 `{video:{...}}` 形状则以 video 对象为准；标题/封面再兜底 video_title/video_cover。 */
+function parseCollectItem(raw: unknown): CollectItem | null {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const nested = r.video && typeof r.video === "object" ? (r.video as Record<string, unknown>) : null;
+  const cands: { src: IdSrc; id: number }[] = [];
+  const add = (src: IdSrc, v: unknown) => {
+    const n = Number(v);
+    if (Number.isFinite(n) && n > 0 && !cands.some((c) => c.id === n)) cands.push({ src, id: n });
+  };
+  add("video_id", r.video_id ?? r.target_id);
+  if (nested) add("nested", nested.id);
+  add("own", r.id);
+  if (!cands.length) return null;
+  const str = (...vs: unknown[]) => {
+    for (const v of vs) if (typeof v === "string" && v) return v;
+    return "";
+  };
+  return {
+    cands,
+    title: str(nested?.title, r.video_title, r.title, r.name),
+    cover: str(nested?.cover, r.video_cover, r.cover, r.poster),
+  };
+}
+
+/** 网站收藏接口的一页：兼容 {items:[...]} / 裸数组两种信封。 */
+function parseCollectsPage(res: unknown): { items: CollectItem[]; total: number | null } {
   const root = res as Record<string, unknown> | null;
   const rawItems: unknown[] = Array.isArray(res)
     ? res
@@ -88,19 +118,7 @@ function normalizeCollects(res: unknown): { items: FavCard[]; total: number | nu
       : [];
   const pag = (!Array.isArray(res) && root?.pagination) as { total?: unknown } | null;
   const total = pag && typeof pag.total === "number" ? pag.total : null;
-  const items: FavCard[] = [];
-  for (const raw of rawItems) {
-    const r = (raw ?? {}) as Record<string, unknown>;
-    const v = (r.video && typeof r.video === "object" ? r.video : r) as Record<string, unknown>;
-    const id = Number(v.id ?? r.video_id ?? r.id);
-    if (!Number.isFinite(id) || id <= 0) continue;
-    items.push({
-      id,
-      title: typeof v.title === "string" ? v.title : "",
-      cover: typeof v.cover === "string" ? v.cover : "",
-    });
-  }
-  return { items, total };
+  return { items: rawItems.map(parseCollectItem).filter((x): x is CollectItem => !!x), total };
 }
 
 function loadPersist(): Persist {
@@ -212,21 +230,55 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const syncFavs = useCallback(async () => {
     if (!userRef.current) return;
     try {
+      const parsed: CollectItem[] = [];
+      const seenKey = new Set<string>();
+      let total = Number.POSITIVE_INFINITY;
+      for (let page = 1; page <= 20 && parsed.length < total; page++) {
+        const res = await api.collects(page, 50);
+        const { items, total: t } = parseCollectsPage(res);
+        if (t != null) total = t;
+        if (!items.length) break;
+        for (const it of items) {
+          const key = it.cands.map((c) => c.id).join("/");
+          if (seenKey.has(key)) continue;
+          seenKey.add(key);
+          parsed.push(it);
+        }
+      }
+      /* 定每条的视频 id，三层保险：
+         1) 候选命中账号的 favorite_video_ids（/me 给的真视频 id 集合）者优先；
+         2) 集合拿不到且条目有多个候选时，用第一条探一次详情接口——能拉到且标题对得上
+            才算命中，把命中来源套用到全部条目（同一接口形状统一，只探一次）；
+         3) 都没有就按候选默认顺序（video_id → 嵌套 video → 记录自身 id）。 */
+      const favSet = new Set(userRef.current?.interactions?.favorite_video_ids ?? []);
+      let winSrc: IdSrc | null = null;
+      if (!favSet.size) {
+        const probe = parsed.find((it) => it.cands.length > 1);
+        if (probe) {
+          const norm = (s: string) => s.replace(/\s+/g, "");
+          for (const cand of probe.cands) {
+            try {
+              const d = await api.video(cand.id);
+              const dt = typeof d?.title === "string" ? norm(d.title) : "";
+              if (d && (!probe.title || !dt || dt === norm(probe.title) || dt.includes(norm(probe.title)) || norm(probe.title).includes(dt))) {
+                winSrc = cand.src;
+                break;
+              }
+            } catch { /* 该候选不是视频 id，试下一个 */ }
+          }
+        }
+      }
       const ids: number[] = [];
       const cards: FavCard[] = [];
       const seen = new Set<number>();
-      let total = Number.POSITIVE_INFINITY;
-      for (let page = 1; page <= 20 && ids.length < total; page++) {
-        const res = await api.collects(page, 50);
-        const { items, total: t } = normalizeCollects(res);
-        if (t != null) total = t;
-        if (!items.length) break;
-        for (const c of items) {
-          if (seen.has(c.id)) continue;
-          seen.add(c.id);
-          ids.push(c.id);
-          cards.push(c);
-        }
+      for (const it of parsed) {
+        const hit = favSet.size ? it.cands.find((c) => favSet.has(c.id)) : undefined;
+        const bySrc = winSrc ? it.cands.find((c) => c.src === winSrc) : undefined;
+        const id = (hit ?? bySrc ?? it.cands[0]).id;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        ids.push(id);
+        cards.push({ id, title: it.title, cover: it.cover });
       }
       remoteFavsRef.current = ids;
       setRemoteFavs(ids);
