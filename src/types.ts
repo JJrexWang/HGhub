@@ -22,6 +22,9 @@ export type VideoCard = {
   author?: Author;
 };
 
+/** 收藏列表渲染所需的最小卡片信息（网站收藏接口归一化后的形状） */
+export type FavCard = { id: number; title: string; cover: string };
+
 export type Pagination = { page: number; pages: number; size: number; total: number };
 export type Paged<T> = { items: T[]; pagination: Pagination };
 

@@ -83,6 +83,8 @@ export const api = {
   postComments: (id: number, page: number, size: number) => call<CommentPage>("api_post_comments", { id, page, size }),
   like: (id: number, ep: number, on: boolean) => call<unknown>("api_like", { id, ep, on }),
   collect: (id: number, on: boolean) => call<unknown>("api_collect", { id, on }),
+  /** 当前账号的网站收藏列表（分页）；未登录会报错，调用方回退本地收藏 */
+  collects: (page = 1, size = 50) => call<unknown>("api_collects", { page, size }),
   follow: (uid: number, on: boolean) => call<unknown>("api_follow", { uid, on }),
 
   /* 线路（数据源）：固定线路写死在 Rust 侧，镜像线路按需从地址发布页拉取 */

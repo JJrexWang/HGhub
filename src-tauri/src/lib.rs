@@ -9,22 +9,62 @@ use api::Api;
 use download::DownloadManager;
 use tauri::Manager;
 
+/// 数据目录（session.json / line.json / downloads 都放这里）。
+/// 桌面端优先「便携」：主程序所在目录可写时就用它，配置文件与主程序同目录；
+/// 不可写（安装到 Program Files / AppImage 只读挂载等）或移动端 / macOS
+/// （写进 .app 包会破坏签名）时回退系统应用数据目录。
+pub fn data_root(fallback: Option<std::path::PathBuf>) -> std::path::PathBuf {
+    #[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
+    {
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                let probe = dir.join(".hghub-probe");
+                if std::fs::write(&probe, b"ok").is_ok() {
+                    let _ = std::fs::remove_file(&probe);
+                    return dir.to_path_buf();
+                }
+            }
+        }
+    }
+    fallback.unwrap_or_else(std::env::temp_dir)
+}
+
+/// 数据目录从系统目录切到主程序旁时，把小配置文件迁过去（保持登录态与线路）。
+/// 下载目录不搬（可能几个 GB），由 DownloadManager 的旧目录回退读取兜住。
+fn migrate_configs(old: &std::path::Path, new: &std::path::Path) {
+    for name in ["session.json", "line.json"] {
+        let src = old.join(name);
+        let dst = new.join(name);
+        if src.is_file() && !dst.exists() {
+            let _ = std::fs::copy(&src, &dst);
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(Api::new())
         .manage(DownloadManager::new())
         .setup(|app| {
-            if let Ok(dir) = app.path().app_data_dir() {
-                let _ = std::fs::create_dir_all(&dir);
-                // 上次选择的线路（设置 → 线路）在启动时恢复
-                net::bind_base(&dir);
-                let state: tauri::State<Api> = app.state();
-                state.session.bind(dir.clone());
-                // 下载索引（downloads/downloads.json）在启动时恢复
-                let dl: tauri::State<DownloadManager> = app.state();
-                dl.bind(app.handle().clone(), dir);
-            }
+            let fallback = app.path().app_data_dir().ok();
+            let dir = data_root(fallback.clone());
+            let _ = std::fs::create_dir_all(&dir);
+            // 数据目录换位时：小配置迁移 + 旧下载目录作为回退来源
+            let legacy = match &fallback {
+                Some(old) if *old != dir => {
+                    migrate_configs(old, &dir);
+                    Some(old.clone())
+                }
+                _ => None,
+            };
+            // 上次选择的线路（设置 → 线路）在启动时恢复
+            net::bind_base(&dir);
+            let state: tauri::State<Api> = app.state();
+            state.session.bind(dir.clone());
+            // 下载索引（downloads/downloads.json）在启动时恢复
+            let dl: tauri::State<DownloadManager> = app.state();
+            dl.bind(app.handle().clone(), dir, legacy);
             Ok(())
         })
         .register_asynchronous_uri_scheme_protocol("hg", |ctx, request, responder| {
@@ -87,6 +127,7 @@ pub fn run() {
             api::api_comment_send,
             api::api_like,
             api::api_collect,
+            api::api_collects,
             api::api_follow,
             download::dl_enqueue,
             download::dl_enqueue_series,

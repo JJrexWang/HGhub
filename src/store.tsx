@@ -1,7 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, platform as envPlatform } from "./api";
-import type { DlTask, User } from "./types";
+import type { DlTask, FavCard, User } from "./types";
 
 export type Platform = "android" | "windows" | "macos";
 export type Theme = "dark" | "light";
@@ -77,6 +77,32 @@ function normalizeHistory(raw: unknown): WatchProgress[] {
   return out;
 }
 
+/** 网站收藏接口的返回归一化：兼容 {items:[...]} / 裸数组，
+ *  条目兼容 VideoCard 本体、{video_id,...} 与 {video:{...}} 三种形状。 */
+function normalizeCollects(res: unknown): { items: FavCard[]; total: number | null } {
+  const root = res as Record<string, unknown> | null;
+  const rawItems: unknown[] = Array.isArray(res)
+    ? res
+    : Array.isArray(root?.items)
+      ? (root!.items as unknown[])
+      : [];
+  const pag = (!Array.isArray(res) && root?.pagination) as { total?: unknown } | null;
+  const total = pag && typeof pag.total === "number" ? pag.total : null;
+  const items: FavCard[] = [];
+  for (const raw of rawItems) {
+    const r = (raw ?? {}) as Record<string, unknown>;
+    const v = (r.video && typeof r.video === "object" ? r.video : r) as Record<string, unknown>;
+    const id = Number(v.id ?? r.video_id ?? r.id);
+    if (!Number.isFinite(id) || id <= 0) continue;
+    items.push({
+      id,
+      title: typeof v.title === "string" ? v.title : "",
+      cover: typeof v.cover === "string" ? v.cover : "",
+    });
+  }
+  return { items, total };
+}
+
 function loadPersist(): Persist {
   try {
     const raw = localStorage.getItem(LS);
@@ -110,6 +136,12 @@ type Store = {
   loginOpen: boolean; setLoginOpen: (b: boolean) => void;
   logout: () => Promise<void>;
   likes: number[]; favs: number[]; history: WatchProgress[]; follows: number[];
+  /** 网站收藏的卡片快照（登录时同步下来，供「我的收藏」直接渲染） */
+  favCards: FavCard[];
+  /** 网站收藏是否已同步成功（登录且为 true 时 favs 以网站为准） */
+  favsSynced: boolean;
+  /** 重新从网站拉取收藏（登录状态下） */
+  syncFavs: () => Promise<void>;
   isLiked: (id: number) => boolean; isFav: (id: number) => boolean;
   toggleLikeLocal: (id: number) => boolean;
   toggleFavLocal: (id: number) => boolean;
@@ -142,6 +174,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [loginOpen, setLoginOpen] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [downloads, setDownloads] = useState<DlTask[]>([]);
+  /* 网站收藏镜像：登录后从网站同步（remoteFavs 非 null 时 favs 以它为准）；
+     退出登录即清空，收藏回落到本地 p.favs */
+  const [remoteFavs, setRemoteFavs] = useState<number[] | null>(null);
+  const [favCards, setFavCards] = useState<FavCard[]>([]);
+  const [favsSynced, setFavsSynced] = useState(false);
+  const userRef = useRef<User | null>(null);
+  const pRef = useRef(p);
+  const remoteFavsRef = useRef<number[] | null>(null);
+
+  useEffect(() => { userRef.current = user; }, [user]);
+  useEffect(() => { pRef.current = p; }, [p]);
   const [theater, setTheaterState] = useState(false);
   const [fs, setFsState] = useState(false);
   const toastSeq = useRef(0);
@@ -164,6 +207,49 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const refreshDownloads = useCallback(async () => {
     try { setDownloads(await api.dlList()); } catch { /* 下载模块未就绪时忽略 */ }
   }, []);
+
+  /** 从网站拉取当前账号的全部收藏（分页聚合），成功后 favs 以网站为准。 */
+  const syncFavs = useCallback(async () => {
+    if (!userRef.current) return;
+    try {
+      const ids: number[] = [];
+      const cards: FavCard[] = [];
+      const seen = new Set<number>();
+      let total = Number.POSITIVE_INFINITY;
+      for (let page = 1; page <= 20 && ids.length < total; page++) {
+        const res = await api.collects(page, 50);
+        const { items, total: t } = normalizeCollects(res);
+        if (t != null) total = t;
+        if (!items.length) break;
+        for (const c of items) {
+          if (seen.has(c.id)) continue;
+          seen.add(c.id);
+          ids.push(c.id);
+          cards.push(c);
+        }
+      }
+      remoteFavsRef.current = ids;
+      setRemoteFavs(ids);
+      setFavCards(cards);
+      setFavsSynced(true);
+    } catch {
+      /* 同步失败不清空既有镜像；从未成功时 favs 回落本地，Profile 里可重试 */
+      setFavsSynced(false);
+    }
+  }, []);
+
+  /* 登录态变化：登录（或启动恢复会话）后同步网站收藏；退出后清空镜像回落本地 */
+  const uid = user?.id;
+  useEffect(() => {
+    if (uid) {
+      void syncFavs();
+    } else {
+      remoteFavsRef.current = null;
+      setRemoteFavs(null);
+      setFavCards([]);
+      setFavsSynced(false);
+    }
+  }, [uid, syncFavs]);
 
   useEffect(() => {
     refreshDownloads();
@@ -195,6 +281,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     return on;
   }, []);
   const toggleFavLocal = useCallback((id: number) => {
+    /* 已登录：改网站收藏镜像（Feed 会同时写网站接口）；未登录：改本地收藏 */
+    if (userRef.current) {
+      const base = remoteFavsRef.current ?? pRef.current.favs;
+      const on = !base.includes(id);
+      const next = on ? [id, ...base] : base.filter((x) => x !== id);
+      remoteFavsRef.current = next;
+      setRemoteFavs(next);
+      return on;
+    }
     let on = false;
     setP((s) => {
       on = !s.favs.includes(id);
@@ -255,14 +350,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setP((s) => ({ ...s, volume, muted: volume === 0 }));
   }, []);
 
+  /* 对外暴露的收藏：已登录且网站镜像就绪时以网站为准，否则本地收藏 */
+  const effFavs = user && remoteFavs ? remoteFavs : p.favs;
+
   const value = useMemo<Store>(() => ({
     platform: envPlatform,
     theme, setTheme: setThemeState,
     tab, setTab, stack, push, pop,
     user, setUser, loginOpen, setLoginOpen, logout,
-    likes: p.likes, favs: p.favs, history: p.history, follows: p.follows,
+    likes: p.likes, favs: effFavs, history: p.history, follows: p.follows,
+    favCards, favsSynced, syncFavs,
     isLiked: (id) => p.likes.includes(id),
-    isFav: (id) => p.favs.includes(id),
+    isFav: (id) => effFavs.includes(id),
     toggleLikeLocal, toggleFavLocal, toggleFollowLocal, addHistory, clearHistory,
     muted: p.muted, setMuted, volume: p.volume, setVolume, theater, setTheater, fs, setFs,
     searchHist: p.searchHist, addSearch, clearSearchHist,
@@ -270,7 +369,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     downloads, refreshDownloads,
     dlOf: (videoId: number, ep: number) => downloads.find((t) => t.video_id === videoId && t.ep === ep),
   }), [theme, tab, setTab, stack, push, pop, user, loginOpen, logout,
-    p, toggleLikeLocal, toggleFavLocal, toggleFollowLocal, addHistory, clearHistory,
+    p, effFavs, remoteFavs, favCards, favsSynced, syncFavs,
+    toggleLikeLocal, toggleFavLocal, toggleFollowLocal, addHistory, clearHistory,
     setMuted, setVolume, addSearch, clearSearchHist, toasts, toast, theater, setTheater, fs, setFs,
     downloads, refreshDownloads]);
 

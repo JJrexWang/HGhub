@@ -173,8 +173,10 @@ const STOP_PAUSE: u8 = 1;
 const STOP_CANCEL: u8 = 2;
 
 pub struct DownloadManager {
-    /// downloads 根目录（app_data_dir/downloads），bind 前为 None
+    /// downloads 根目录（数据目录/downloads），bind 前为 None
     root: Mutex<Option<PathBuf>>,
+    /// 数据目录迁移前的旧 downloads 根目录：索引/成品的回退来源，bind 时按需设置
+    legacy_root: Mutex<Option<PathBuf>>,
     tasks: Mutex<Vec<DlTask>>,
     flags: Mutex<HashMap<String, Arc<AtomicU8>>>,
     worker_alive: Mutex<bool>,
@@ -185,6 +187,7 @@ impl DownloadManager {
     pub fn new() -> Self {
         Self {
             root: Mutex::new(None),
+            legacy_root: Mutex::new(None),
             tasks: Mutex::new(Vec::new()),
             flags: Mutex::new(HashMap::new()),
             worker_alive: Mutex::new(false),
@@ -193,12 +196,22 @@ impl DownloadManager {
     }
 
     /// 启动时绑定：读回索引；上次被杀掉时停在 downloading/queued 的降级为 paused（可续传）。
-    pub fn bind(&self, app: AppHandle, data_dir: PathBuf) {
+    /// legacy_data_dir：数据目录迁移前的旧数据目录；主目录还没有索引时先读它的索引，
+    /// 成品文件按「主目录 → 旧目录」顺序解析，旧文件不搬也能播、能删。
+    pub fn bind(&self, app: AppHandle, data_dir: PathBuf, legacy_data_dir: Option<PathBuf>) {
         let root = data_dir.join("downloads");
         let _ = std::fs::create_dir_all(&root);
+        let legacy_dl = legacy_data_dir
+            .map(|d| d.join("downloads"))
+            .filter(|p| p.is_dir() && *p != root);
         let index = root.join("downloads.json");
+        let index_text = std::fs::read_to_string(&index).ok().or_else(|| {
+            legacy_dl
+                .as_ref()
+                .and_then(|d| std::fs::read_to_string(d.join("downloads.json")).ok())
+        });
         let mut loaded: Vec<DlTask> = Vec::new();
-        if let Ok(text) = std::fs::read_to_string(&index) {
+        if let Some(text) = index_text {
             if let Ok(mut v) = serde_json::from_str::<Vec<DlTask>>(&text) {
                 for t in v.iter_mut() {
                     if t.status == ST_DOWNLOADING || t.status == ST_QUEUED {
@@ -210,12 +223,44 @@ impl DownloadManager {
         }
         *self.tasks.lock().unwrap() = loaded;
         *self.root.lock().unwrap() = Some(root);
+        *self.legacy_root.lock().unwrap() = legacy_dl;
         *self.app.lock().unwrap() = Some(app);
         self.persist();
     }
 
     pub fn root(&self) -> Option<PathBuf> {
         self.root.lock().unwrap().clone()
+    }
+
+    pub fn legacy_root(&self) -> Option<PathBuf> {
+        self.legacy_root.lock().unwrap().clone()
+    }
+
+    /// 主目录 + 旧目录（删除/清理时逐个尝试）。
+    fn all_roots(&self) -> Vec<PathBuf> {
+        let mut v = Vec::new();
+        if let Some(r) = self.root() {
+            v.push(r);
+        }
+        if let Some(r) = self.legacy_root() {
+            v.push(r);
+        }
+        v
+    }
+
+    /// 成品相对路径 → 绝对路径：主目录有就用主目录，否则回退旧目录。
+    fn resolve_file(&self, rel: &str) -> Option<PathBuf> {
+        let primary = self.root()?.join(rel);
+        if primary.is_file() {
+            return Some(primary);
+        }
+        if let Some(legacy) = self.legacy_root() {
+            let p = legacy.join(rel);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+        Some(primary)
     }
 
     pub fn list(&self) -> Vec<DlTask> {
@@ -270,11 +315,10 @@ impl DownloadManager {
 
     /// 已完成任务的成品绝对路径（离线播放用）。
     pub fn done_file(&self, video_id: i64, ep: u32) -> Option<(PathBuf, String, u64)> {
-        let root = self.root()?;
         let tasks = self.tasks.lock().unwrap();
         let t = tasks.iter().find(|t| t.video_id == video_id && t.ep == ep && t.status == ST_DONE)?;
         let rel = t.rel_path.as_ref()?;
-        let path = root.join(rel);
+        let path = self.resolve_file(rel)?;
         if path.is_file() {
             Some((path, t.format.clone().unwrap_or_else(|| "ts".into()), t.duration))
         } else {
@@ -1026,10 +1070,12 @@ pub async fn dl_cancel(dl: State<'_, DownloadManager>, id: String) -> Result<(),
     let task = dl.list().into_iter().find(|t| t.id == id);
     if let Some(t) = task {
         if t.status == ST_QUEUED || t.status == ST_PAUSED || t.status == ST_FAILED {
-            if let Some(root) = dl.root() {
+            {
                 let stem = file_stem(&t.title, t.ep, t.total_episodes, &t.ep_title);
-                let part = root.join(work_dir_name(&t.title, t.video_id)).join(format!("{stem}.part"));
-                let _ = std::fs::remove_dir_all(part);
+                for root in dl.all_roots() {
+                    let part = root.join(work_dir_name(&t.title, t.video_id)).join(format!("{stem}.part"));
+                    let _ = std::fs::remove_dir_all(part);
+                }
             }
             dl.update(&id, |t| {
                 t.status = ST_CANCELED.to_string();
@@ -1043,20 +1089,22 @@ pub async fn dl_cancel(dl: State<'_, DownloadManager>, id: String) -> Result<(),
 
 /// 删除一条记录：成品文件 + 临时目录 + 索引一起删（同命令内完成，不留半截状态）。
 fn remove_task_files(dl: &DownloadManager, t: &DlTask) {
-    let Some(root) = dl.root() else { return };
-    if let Some(rel) = &t.rel_path {
-        let _ = std::fs::remove_file(root.join(rel));
-    }
-    let stem = file_stem(&t.title, t.ep, t.total_episodes, &t.ep_title);
-    let work = root.join(work_dir_name(&t.title, t.video_id));
-    let _ = std::fs::remove_dir_all(work.join(format!("{stem}.part")));
-    // 目录空了（只剩 cover 也算空）就一并清掉作品目录
-    if let Ok(mut rd) = std::fs::read_dir(&work) {
-        let entries: Vec<_> = rd.by_ref().collect();
-        let only_cover = entries.len() == 1
-            && entries[0].as_ref().map(|e| e.file_name().to_string_lossy() == "cover.jpg").unwrap_or(false);
-        if entries.is_empty() || only_cover {
-            let _ = std::fs::remove_dir_all(&work);
+    // 成品可能在主目录或旧目录，逐个根目录清理
+    for root in dl.all_roots() {
+        if let Some(rel) = &t.rel_path {
+            let _ = std::fs::remove_file(root.join(rel));
+        }
+        let stem = file_stem(&t.title, t.ep, t.total_episodes, &t.ep_title);
+        let work = root.join(work_dir_name(&t.title, t.video_id));
+        let _ = std::fs::remove_dir_all(work.join(format!("{stem}.part")));
+        // 目录空了（只剩 cover 也算空）就一并清掉作品目录
+        if let Ok(mut rd) = std::fs::read_dir(&work) {
+            let entries: Vec<_> = rd.by_ref().collect();
+            let only_cover = entries.len() == 1
+                && entries[0].as_ref().map(|e| e.file_name().to_string_lossy() == "cover.jpg").unwrap_or(false);
+            if entries.is_empty() || only_cover {
+                let _ = std::fs::remove_dir_all(&work);
+            }
         }
     }
 }

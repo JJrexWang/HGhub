@@ -1,16 +1,17 @@
 import { useEffect, useState } from "react";
 import { api, APP_VERSION, fmt, fmtBytes, fmtTime, platform } from "../api";
-import type { Detail } from "../types";
+import type { FavCard } from "../types";
 import { useStore } from "../store";
 import { Avatar, Empty, Img } from "../components/ui";
 import { IChevR, IClock, ILogout, ISettings, IStar, IUser } from "../icons";
 
 /* 我的：结构固定（资料卡 + 我的收藏 / 观看历史）。
-   收藏与观看记录都存在本地，所以未登录也照常展示；未登录时资料卡本身就是登录入口。 */
+   收藏：已登录时以网站收藏为准（进应用/登录后自动同步），未登录用本地收藏；
+   观看记录仍是本地的。未登录时资料卡本身就是登录入口。 */
 export default function Profile({ wide }: { wide: boolean }) {
-  const { user, setLoginOpen, logout, history, favs, clearHistory, push, downloads } = useStore();
+  const { user, setLoginOpen, logout, history, favs, favCards, favsSynced, syncFavs, clearHistory, push, downloads } = useStore();
   const [tab, setTab] = useState<"fav" | "history" | "dl">("fav");
-  const [cards, setCards] = useState<Detail[]>([]);
+  const [cards, setCards] = useState<FavCard[]>([]);
   const [loading, setLoading] = useState(false);
 
   const ids = tab === "fav" ? favs : tab === "history" ? history.map((h) => h.id) : [];
@@ -33,16 +34,31 @@ export default function Profile({ wide }: { wide: boolean }) {
 
   useEffect(() => {
     let alive = true;
-    if (!ids.length) { setCards([]); return; }
+    /* 收藏页：网站同步下来的卡片快照直接用；缺快照的（刚收藏的）再按 id 补拉详情。
+       历史页维持原样：按 id 拉详情，最多 12 条。 */
+    const want = tab === "fav" ? ids : ids.slice(0, 12);
+    if (!want.length) { setCards([]); return; }
+    const byId = new Map<number, FavCard>();
+    if (tab === "fav") for (const c of favCards) byId.set(c.id, c);
+    const missing = want.filter((id) => !byId.has(id)).slice(0, tab === "fav" ? 30 : 12);
+    const finish = () => {
+      if (alive) setCards(want.map((id) => byId.get(id)).filter((c): c is FavCard => !!c));
+    };
+    if (!missing.length) { finish(); return; }
     setLoading(true);
-    Promise.allSettled(ids.slice(0, 12).map((id) => api.video(id)))
+    Promise.allSettled(missing.map((id) => api.video(id)))
       .then((rs) => {
-        if (!alive) return;
-        setCards(rs.filter((r) => r.status === "fulfilled").map((r) => (r as PromiseFulfilledResult<Detail>).value));
+        for (const r of rs) {
+          if (r.status === "fulfilled") {
+            const d = r.value;
+            byId.set(d.id, { id: d.id, title: d.title, cover: d.cover });
+          }
+        }
+        finish();
       })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, [ids.join(",")]);
+  }, [tab, ids.join(","), favCards]);
 
   return (
     <div className="absolute inset-0 bg-bg flex flex-col">
@@ -66,7 +82,7 @@ export default function Profile({ wide }: { wide: boolean }) {
               <div className="text-[11px] text-mut mt-0.5">@{user.username} · ID {user.id}</div>
               <div className="flex gap-3 mt-2 text-[10.5px] text-mut">
                 <span>点赞 <b className="text-on">{fmt(user.counts?.like)}</b></span>
-                <span>收藏 <b className="text-on">{fmt(user.counts?.collect)}</b></span>
+                <span>收藏 <b className="text-on">{favsSynced ? favs.length : fmt(user.counts?.collect)}</b></span>
                 <span>关注 <b className="text-on">{fmt(user.counts?.following)}</b></span>
               </div>
             </div>
@@ -163,10 +179,17 @@ export default function Profile({ wide }: { wide: boolean }) {
               })}
             </div>
           ) : (
-            <Empty icon={tab === "fav" ? <IStar size={24} /> : <IClock size={24} />}
-              title={tab === "fav" ? "还没有收藏" : "还没有观看记录"}
-              sub={tab === "fav" ? "在剧集页点收藏，之后就能在这里找到" : "看过的剧集会出现在这里"}
-              action="去逛逛" onAction={() => push({ kind: "ranks" })} />
+            tab === "fav" && user && !favsSynced ? (
+              <Empty icon={<IStar size={24} />}
+                title="网站收藏还没同步上"
+                sub="网络不通时这里先按本地收藏显示，恢复后点重试同步网站收藏"
+                action="重试同步" onAction={() => { void syncFavs(); }} />
+            ) : (
+              <Empty icon={tab === "fav" ? <IStar size={24} /> : <IClock size={24} />}
+                title={tab === "fav" ? "还没有收藏" : "还没有观看记录"}
+                sub={tab === "fav" ? "在剧集页点收藏，之后就能在这里找到" : "看过的剧集会出现在这里"}
+                action="去逛逛" onAction={() => push({ kind: "ranks" })} />
+            )
           )}
           {cards.length > 0 && tab === "history" && (
             <button onClick={clearHistory} className="mt-3 w-full h-9 rounded-(--r-ctl) bg-s3 text-[12px] text-mut pressable">清空观看历史</button>

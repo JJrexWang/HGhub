@@ -1,7 +1,7 @@
 {
   "name": "huangguo-client",
   "private": true,
-  "version": "1.2.0-enhanced.1",
+  "version": "1.2.0-enhanced.2",
   "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "scripts": {

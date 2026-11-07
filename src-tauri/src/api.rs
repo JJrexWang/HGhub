@@ -33,11 +33,11 @@ impl Api {
     }
 }
 
-/// 诊断用：把前端自检结果写到应用数据目录 debug.log
+/// 诊断用：把前端自检结果写到数据目录（与主程序同目录优先）debug.log
 #[tauri::command]
 pub async fn debug_log(app: tauri::AppHandle, msg: String) -> Result<(), String> {
     use tauri::Manager;
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let dir = crate::data_root(app.path().app_data_dir().ok());
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("debug.log");
     use std::io::Write;
@@ -406,6 +406,15 @@ pub async fn api_collect(
     let method = if on { "POST" } else { "DELETE" };
     state
         .authed(method, &format!("/api/videos/{id}/collect"), None)
+        .await
+}
+
+/// 当前账号的收藏列表（分页，形状与其它列表接口一致）。
+/// 未登录时上游返回 unauthorized 错误，前端据此回退本地收藏。
+#[tauri::command]
+pub async fn api_collects(state: State<'_, Api>, page: u32, size: u32) -> Result<Value, String> {
+    state
+        .get(&format!("/api/users/me/collects?page={page}&size={size}"))
         .await
 }
 
