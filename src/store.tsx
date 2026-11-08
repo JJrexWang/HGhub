@@ -52,12 +52,15 @@ type Persist = {
   muted: boolean;
   volume: number;
   searchHist: string[];
+  /** 已下载作品的线上集数快照（启动时逐部查询刷新）：videoId → 线上集号列表。
+   *  与本地任务一对比就知道哪部有新集（徽标与「一键更新库存」都靠它）。 */
+  dlSnap: Record<number, number[]>;
 };
 
 const LS = "hghub_app_v1";
 const DEFAULTS: Persist = {
   likes: [], favs: [], history: [], follows: [],
-  muted: true, volume: 0.7, searchHist: [],
+  muted: true, volume: 0.7, searchHist: [], dlSnap: {},
 };
 
 /** 旧版本 history 是 number[]，读出来时升级成带进度的结构 */
@@ -177,6 +180,20 @@ type Store = {
   downloads: DlTask[];
   refreshDownloads: () => Promise<void>;
   dlOf: (videoId: number, ep: number) => DlTask | undefined;
+  /** 已下载作品的线上集数快照：videoId → 线上集号列表（启动时自动查一次） */
+  dlSnap: Record<number, number[]>;
+  /** 某作品比本地已下载进度更新的新集集号（快照里超出本地最大已持有集号的部分） */
+  dlNewEps: (videoId: number) => number[];
+  /** 正在逐部查询已下载作品的线上更新 */
+  dlChecking: boolean;
+  /** 重新查询全部已下载作品的线上集数（更新快照），返回最新快照 */
+  checkDlUpdates: () => Promise<Record<number, number[]>>;
+  /** 批量操作进度（收藏全量下载 / 一键更新库存期间非 null） */
+  bulk: { kind: "favs" | "updates"; done: number; total: number } | null;
+  /** 一键下载/更新全部收藏：全部作品全部集数入队，已下载/下载中的集自动跳过 */
+  downloadAllFavs: () => Promise<void>;
+  /** 一键更新库存：先刷新快照，再把已下载作品的新集全部入队 */
+  updateDownloaded: () => Promise<void>;
 };
 
 const Ctx = createContext<Store>(null as unknown as Store);
@@ -192,6 +209,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [loginOpen, setLoginOpen] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [downloads, setDownloads] = useState<DlTask[]>([]);
+  const downloadsRef = useRef<DlTask[]>([]);
+  const [dlChecking, setDlChecking] = useState(false);
+  const dlCheckingRef = useRef(false);
+  const [bulk, setBulk] = useState<{ kind: "favs" | "updates"; done: number; total: number } | null>(null);
+  const bulkRef = useRef(false);
   /* 网站收藏镜像：登录后从网站同步（remoteFavs 非 null 时 favs 以它为准）；
      退出登录即清空，收藏回落到本地 p.favs */
   const [remoteFavs, setRemoteFavs] = useState<number[] | null>(null);
@@ -203,6 +225,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => { userRef.current = user; }, [user]);
   useEffect(() => { pRef.current = p; }, [p]);
+  useEffect(() => { downloadsRef.current = downloads; }, [downloads]);
   const [theater, setTheaterState] = useState(false);
   const [fs, setFsState] = useState(false);
   const toastSeq = useRef(0);
@@ -223,7 +246,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const refreshDownloads = useCallback(async () => {
-    try { setDownloads(await api.dlList()); } catch { /* 下载模块未就绪时忽略 */ }
+    try {
+      const list = await api.dlList();
+      downloadsRef.current = list;
+      setDownloads(list);
+    } catch { /* 下载模块未就绪时忽略 */ }
   }, []);
 
   /** 从网站拉取当前账号的全部收藏（分页聚合），成功后 favs 以网站为准。 */
@@ -317,6 +344,124 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setToasts((t) => [...t.slice(-2), { id, msg, icon }]);
     window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 2200);
   }, []);
+
+  /* ── 已下载作品的线上更新 ───────────────────────────────────
+     「算已有」的集：已完成 + 排队/下载中/暂停。失败/取消不算已有，
+     一键操作时会经 Rust 侧 enqueue 语义自动重新入队续传。 */
+  const HAVE_ST = new Set(["done", "queued", "downloading", "paused"]);
+  const newEpsOf = (tasks: DlTask[], snap: Record<number, number[]>, id: number): number[] => {
+    const remote = snap[id];
+    if (!remote?.length) return [];
+    let localMax = 0;
+    for (const t of tasks) if (t.video_id === id && HAVE_ST.has(t.status)) localMax = Math.max(localMax, t.ep);
+    return remote.filter((ep) => ep > localMax);
+  };
+
+  /** 逐部查询已下载作品的线上集数并刷新快照（4 部一批，最多 80 部）。返回最新快照。 */
+  const checkDlUpdates = useCallback(async (): Promise<Record<number, number[]>> => {
+    if (dlCheckingRef.current) return pRef.current.dlSnap;
+    const works = [...new Set(downloadsRef.current.map((t) => t.video_id))].slice(0, 80);
+    if (!works.length) return pRef.current.dlSnap;
+    dlCheckingRef.current = true;
+    setDlChecking(true);
+    const snap: Record<number, number[]> = { ...pRef.current.dlSnap };
+    try {
+      for (let i = 0; i < works.length; i += 4) {
+        const batch = works.slice(i, i + 4);
+        const rs = await Promise.allSettled(batch.map((id) => api.video(id)));
+        rs.forEach((r, j) => {
+          if (r.status !== "fulfilled") return;
+          const eps = [...new Set((r.value.episodes || []).map((e) => e.ep_num).filter((n) => n > 0))].sort((a, b) => a - b);
+          if (eps.length) snap[batch[j]] = eps;
+          else if (r.value.total_episodes > 0) {
+            snap[batch[j]] = Array.from({ length: r.value.total_episodes }, (_, k) => k + 1);
+          }
+        });
+      }
+      setP((s) => ({ ...s, dlSnap: snap }));
+      return snap;
+    } finally {
+      dlCheckingRef.current = false;
+      setDlChecking(false);
+    }
+  }, []);
+
+  /** 一键下载/更新全部收藏：逐部读线上集数，与本地任务对比后只把缺的集入队。 */
+  const downloadAllFavs = useCallback(async () => {
+    if (bulkRef.current) return;
+    const favIds = userRef.current && remoteFavsRef.current ? remoteFavsRef.current : pRef.current.favs;
+    if (!favIds.length) { toast("还没有收藏可下载", "info"); return; }
+    bulkRef.current = true;
+    setBulk({ kind: "favs", done: 0, total: favIds.length });
+    let addWorks = 0, addEps = 0, skipEps = 0, failWorks = 0;
+    try {
+      await refreshDownloads();
+      for (let i = 0; i < favIds.length; i++) {
+        const id = favIds[i];
+        try {
+          const d = await api.video(id);
+          let eps = [...new Set((d.episodes || []).map((e) => e.ep_num).filter((n) => n > 0))].sort((a, b) => a - b);
+          if (!eps.length && d.total_episodes > 0) eps = Array.from({ length: d.total_episodes }, (_, k) => k + 1);
+          const have = new Set(downloadsRef.current.filter((t) => t.video_id === id && HAVE_ST.has(t.status)).map((t) => t.ep));
+          const todo = eps.filter((ep) => !have.has(ep));
+          skipEps += eps.length - todo.length;
+          if (todo.length) {
+            await api.dlEnqueueSeries(id, todo);
+            addWorks++;
+            addEps += todo.length;
+            await refreshDownloads();
+          }
+        } catch { failWorks++; }
+        setBulk({ kind: "favs", done: i + 1, total: favIds.length });
+      }
+      toast(addEps
+        ? `收藏下载：新增 ${addWorks} 部、${addEps} 集已入队，跳过已下载 ${skipEps} 集${failWorks ? `，${failWorks} 部读取失败` : ""}`
+        : `收藏里的集都已下载，跳过 ${skipEps} 集${failWorks ? `，${failWorks} 部读取失败` : ""}`, "ok");
+    } finally {
+      bulkRef.current = false;
+      setBulk(null);
+      void refreshDownloads();
+    }
+  }, [refreshDownloads, toast]);
+
+  /** 一键更新库存：先刷新线上集数快照，再把每部已下载作品的新集入队。 */
+  const updateDownloaded = useCallback(async () => {
+    if (bulkRef.current) return;
+    if (!downloadsRef.current.length) { toast("还没有已下载的作品", "info"); return; }
+    bulkRef.current = true;
+    try {
+      const snap = await checkDlUpdates();
+      const works = [...new Set(downloadsRef.current.map((t) => t.video_id))];
+      setBulk({ kind: "updates", done: 0, total: works.length });
+      let addWorks = 0, addEps = 0;
+      for (let i = 0; i < works.length; i++) {
+        const id = works[i];
+        const news = newEpsOf(downloadsRef.current, snap, id);
+        if (news.length) {
+          try {
+            await api.dlEnqueueSeries(id, news);
+            addWorks++;
+            addEps += news.length;
+            await refreshDownloads();
+          } catch { /* 单部失败不中断其余作品 */ }
+        }
+        setBulk({ kind: "updates", done: i + 1, total: works.length });
+      }
+      toast(addEps ? `库存更新：${addWorks} 部新增 ${addEps} 集已入队` : "库存已是最新，没有新集", "ok");
+    } finally {
+      bulkRef.current = false;
+      setBulk(null);
+      void refreshDownloads();
+    }
+  }, [checkDlUpdates, refreshDownloads, toast]);
+
+  /* 每次打开软件：下载列表就绪后，自动查一次已下载作品的线上更新（更新徽标靠它） */
+  const dlBootRef = useRef(false);
+  useEffect(() => {
+    if (dlBootRef.current) return;
+    dlBootRef.current = true;
+    void refreshDownloads().then(() => checkDlUpdates());
+  }, [refreshDownloads, checkDlUpdates]);
 
   const setTab = useCallback((t: Tab) => { setTabRaw(t); setStack([]); }, []);
   const push = useCallback((pg: PageInput) => {
@@ -420,11 +565,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     toasts, toast,
     downloads, refreshDownloads,
     dlOf: (videoId: number, ep: number) => downloads.find((t) => t.video_id === videoId && t.ep === ep),
+    dlSnap: p.dlSnap, dlNewEps: (videoId: number) => newEpsOf(downloads, p.dlSnap, videoId),
+    dlChecking, checkDlUpdates, bulk, downloadAllFavs, updateDownloaded,
   }), [theme, tab, setTab, stack, push, pop, user, loginOpen, logout,
     p, effFavs, remoteFavs, favCards, favsSynced, syncFavs,
     toggleLikeLocal, toggleFavLocal, toggleFollowLocal, addHistory, clearHistory,
     setMuted, setVolume, addSearch, clearSearchHist, toasts, toast, theater, setTheater, fs, setFs,
-    downloads, refreshDownloads]);
+    downloads, refreshDownloads, dlChecking, checkDlUpdates, bulk, downloadAllFavs, updateDownloaded]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

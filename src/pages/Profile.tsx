@@ -3,13 +3,13 @@ import { api, APP_VERSION, fmt, fmtBytes, fmtTime, platform } from "../api";
 import type { FavCard } from "../types";
 import { useStore } from "../store";
 import { Avatar, Empty, Img } from "../components/ui";
-import { IChevR, IClock, ILogout, ISettings, IStar, IUser } from "../icons";
+import { IChevR, IClock, IDownload, ILogout, ISettings, IStar, IUser } from "../icons";
 
 /* 我的：结构固定（资料卡 + 我的收藏 / 观看历史）。
    收藏：已登录时以网站收藏为准（进应用/登录后自动同步），未登录用本地收藏；
    观看记录仍是本地的。未登录时资料卡本身就是登录入口。 */
 export default function Profile({ wide }: { wide: boolean }) {
-  const { user, setLoginOpen, logout, history, favs, favCards, favsSynced, syncFavs, clearHistory, push, downloads } = useStore();
+  const { user, setLoginOpen, logout, history, favs, favCards, favsSynced, syncFavs, clearHistory, push, downloads, bulk, downloadAllFavs, dlNewEps } = useStore();
   const [tab, setTab] = useState<"fav" | "history" | "dl">("fav");
   const [cards, setCards] = useState<FavCard[]>([]);
   const [loading, setLoading] = useState(false);
@@ -138,6 +138,11 @@ export default function Profile({ wide }: { wide: boolean }) {
                       <div className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded-full bg-black/65 text-[9.5px] text-white/90 leading-none">
                         已下 {w.eps.length} 集
                       </div>
+                      {dlNewEps(w.video_id).length > 0 && (
+                        <div className="absolute top-1.5 right-1.5 px-1.5 py-0.5 rounded-full bg-[#e5534b] text-[9.5px] font-semibold text-white leading-none">
+                          更新 {dlNewEps(w.video_id).length} 集
+                        </div>
+                      )}
                       <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 to-transparent p-1.5">
                         <div className="text-[10.5px] text-white clamp-2 leading-tight">{w.title}</div>
                         <div className="text-[9px] text-white/60">{fmtBytes(w.size)}</div>
@@ -155,6 +160,17 @@ export default function Profile({ wide }: { wide: boolean }) {
           ) : loading ? (
             <div className="flex justify-center py-8"><div className="w-7 h-7 spinner" /></div>
           ) : cards.length ? (
+            <>
+            {tab === "fav" && (
+              <button disabled={!!bulk} onClick={() => { void downloadAllFavs(); }}
+                className="w-full mb-3 h-10 rounded-(--r-ctl) bg-primary text-on-primary flex items-center justify-center gap-2 text-[12.5px] font-semibold pressable disabled:opacity-60">
+                <IDownload size={15} />
+                {bulk?.kind === "favs"
+                  ? `正在处理收藏 ${bulk.done}/${bulk.total}…`
+                  : bulk ? "有批量任务进行中…" : "一键下载 / 更新全部收藏"}
+                {!bulk && <span className="text-[10.5px] font-normal opacity-80">已下载的集自动跳过</span>}
+              </button>
+            )}
             <div className="grid grid-cols-3 gap-2">
               {cards.map((c) => {
                 const p = progressOf(c.id);
@@ -178,6 +194,7 @@ export default function Profile({ wide }: { wide: boolean }) {
                 );
               })}
             </div>
+            </>
           ) : (
             tab === "fav" && user && !favsSynced ? (
               <Empty icon={<IStar size={24} />}
