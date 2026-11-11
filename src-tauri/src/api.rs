@@ -3,6 +3,7 @@
 use crate::net::{base, edge};
 use crate::session::SessionStore;
 use serde_json::{json, Value};
+use std::time::Duration;
 use tauri::State;
 
 pub struct Api {
@@ -23,6 +24,12 @@ impl Api {
     async fn get(&self, path: &str) -> Result<Value, String> {
         let token = self.token();
         edge("GET", path, None, token.as_deref()).await
+    }
+
+    /// POST（游客也可调用，有登录态时带上 token）：新播放接口需要。
+    async fn post(&self, path: &str, body: Option<Value>) -> Result<Value, String> {
+        let token = self.token();
+        edge("POST", path, body, token.as_deref()).await
     }
 
     async fn authed(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value, String> {
@@ -202,8 +209,43 @@ fn open_external(_url: &str) -> Result<(), String> {
 
 /* ───────────────────────── 会话 ───────────────────────── */
 
+/// 探一条线路的业务网关是否可用（主页 200 不算数，必须 /api/edge/request 能通）。
+async fn edge_alive(base_url: &str) -> bool {
+    let envelope = json!({ "method": "GET", "path": "/api/videos", "body": "", "content_type": "" });
+    let url = format!("{base_url}/api/edge/request");
+    let referer = format!("{base_url}/");
+    match crate::net::client()
+        .post(&url)
+        .header("Accept", "application/json")
+        .header("Referer", &referer)
+        .json(&envelope)
+        .timeout(Duration::from_secs(6))
+        .send()
+        .await
+    {
+        Ok(r) => r.status().is_success(),
+        Err(_) => false,
+    }
+}
+
+/// 保存的线路若已失效（镜像下线、网关 404 等），启动时回退到默认线路，
+/// 避免用户卡在死线路上连首页都刷不出来。默认线路本身不探、不动。
+async fn rescue_dead_line() {
+    let cur = base();
+    if cur == crate::net::DEFAULT_BASE {
+        return;
+    }
+    if edge_alive(&cur).await {
+        return;
+    }
+    if edge_alive(crate::net::DEFAULT_BASE).await {
+        let _ = crate::net::set_base(crate::net::DEFAULT_BASE);
+    }
+}
+
 #[tauri::command]
 pub async fn app_boot(state: State<'_, Api>) -> Result<Value, String> {
+    rescue_dead_line().await;
     Ok(json!({
         "user": state.session.user(),
         "logged_in": state.session.token().is_some(),
@@ -342,10 +384,61 @@ pub async fn api_video(state: State<'_, Api>, id: i64) -> Result<Value, String> 
 }
 
 #[tauri::command]
+/// 新版播放接口返回 `streams.{main,hevc,preview}`，旧接口的 `video_url` 现在恒为空串。
+/// 这里把新字段回填到 `video_url` / `video_url_hevc`，前端和自检继续按原字段取流。
+fn normalize_play_info(info: &mut Value) {
+    fn non_empty(v: Option<&Value>) -> Option<String> {
+        v.and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    }
+    let main = non_empty(info.get("streams").and_then(|s| s.get("main")));
+    let hevc = non_empty(info.get("streams").and_then(|s| s.get("hevc")));
+    let Some(obj) = info.as_object_mut() else { return };
+    for (field, stream) in [("video_url", main), ("video_url_hevc", hevc)] {
+        if let Some(url) = stream {
+            if non_empty(obj.get(field)).is_none() {
+                obj.insert(field.into(), json!(url));
+            }
+        }
+    }
+}
+
+fn has_play_url(info: &Value) -> bool {
+    info.get("video_url")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty())
+}
+
+#[tauri::command]
 pub async fn api_play(state: State<'_, Api>, id: i64, ep: u32) -> Result<Value, String> {
-    state
+    // 优先走新接口；失败或没有可用地址时再退回旧接口，两者都不行就返回新接口的结果/错误。
+    let primary = state
+        .post(&format!("/api/videos/{id}/episodes/{ep}/playback"), Some(json!({})))
+        .await
+        .map(|mut info| {
+            normalize_play_info(&mut info);
+            info
+        });
+    if let Ok(info) = &primary {
+        if has_play_url(info) {
+            return primary;
+        }
+    }
+    match state
         .get(&format!("/api/videos/{id}/play?ep={ep}&page_texts=0"))
         .await
+    {
+        Ok(mut legacy) => {
+            normalize_play_info(&mut legacy);
+            if has_play_url(&legacy) || primary.is_err() {
+                Ok(legacy)
+            } else {
+                primary
+            }
+        }
+        Err(_) => primary,
+    }
 }
 
 /* ───────────────────────── 评论 / 互动 ───────────────────────── */
@@ -469,7 +562,32 @@ pub async fn api_post_comments(
 }
 #[cfg(test)]
 mod tests {
-    use super::is_newer;
+    use super::{has_play_url, is_newer, normalize_play_info};
+    use serde_json::json;
+
+    #[test]
+    fn new_playback_streams_fill_legacy_url_fields() {
+        let mut info = json!({
+            "video_url": "",
+            "streams": {"main": "https://x/main.m3u8", "hevc": "https://x/hevc.m3u8", "preview": "https://x/p.m3u8"}
+        });
+        normalize_play_info(&mut info);
+        assert_eq!(info["video_url"], "https://x/main.m3u8");
+        assert_eq!(info["video_url_hevc"], "https://x/hevc.m3u8");
+        assert!(has_play_url(&info));
+    }
+
+    #[test]
+    fn existing_video_url_is_kept_and_empty_streams_stay_empty() {
+        let mut keep = json!({"video_url": "https://old/a.m3u8", "streams": {"main": "https://x/main.m3u8"}});
+        normalize_play_info(&mut keep);
+        assert_eq!(keep["video_url"], "https://old/a.m3u8");
+
+        let mut empty = json!({"video_url": "", "streams": {"main": ""}});
+        normalize_play_info(&mut empty);
+        assert!(!has_play_url(&empty));
+        assert!(!has_play_url(&json!({"id": 1})));
+    }
 
     #[test]
     fn compares_versions() {

@@ -234,6 +234,19 @@ pub async fn diagnose() -> Value {
 
 /// 站点偶发 TLS 抖动（实测），统一重试；碰上代理隧道错误就先重建客户端再试
 /// （代理软件开关后旧客户端会一直卡在 tunnel error 上）。
+/// 确定性失败不重试：401（登录态失效）与 4xx（除 408/429）重试也不会变好，只会拖慢报错。
+fn retryable(err: &str) -> bool {
+    if err == "401" {
+        return false;
+    }
+    if let Some(rest) = err.strip_prefix("HTTP ") {
+        if let Some(code) = rest.get(..3).and_then(|s| s.parse::<u16>().ok()) {
+            return code >= 500 || code == 408 || code == 429;
+        }
+    }
+    true
+}
+
 async fn with_retry<F, Fut, T>(mut f: F) -> Result<T, String>
 where
     F: FnMut(reqwest::Client) -> Fut,
@@ -245,6 +258,9 @@ where
             Ok(v) => return Ok(v),
             Err(e) => {
                 last = e;
+                if !retryable(&last) {
+                    break;
+                }
                 heal_client(&last);
                 if attempt < 2 {
                     tokio::time::sleep(Duration::from_millis(350 * (attempt as u64 + 1))).await;

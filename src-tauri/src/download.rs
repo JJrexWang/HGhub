@@ -606,6 +606,63 @@ async fn get_json(app: &AppHandle, path: &str) -> Result<Value, String> {
     edge("GET", path, None, token.as_deref()).await
 }
 
+async fn post_json(app: &AppHandle, path: &str, body: Value) -> Result<Value, String> {
+    let token = token_of(app);
+    edge("POST", path, Some(body), token.as_deref()).await
+}
+
+/// 从播放信息里取可下载地址：旧字段 `video_url` 优先，其次新接口的 `streams.main/hevc`。
+fn play_url_of(play: &Value) -> String {
+    if let Some(u) = play.get("video_url").and_then(|v| v.as_str()) {
+        if !u.is_empty() {
+            return u.to_string();
+        }
+    }
+    for key in ["main", "hevc"] {
+        if let Some(u) = play
+            .get("streams")
+            .and_then(|s| s.get(key))
+            .and_then(|v| v.as_str())
+        {
+            if !u.is_empty() {
+                return u.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+/// 取播放信息：优先新接口（POST .../episodes/{ep}/playback，旧接口的 video_url 已恒为空），
+/// 失败或没有可用地址时再退回旧接口。
+async fn fetch_play_info(app: &AppHandle, video_id: i64, ep: u32) -> Result<Value, String> {
+    let mut primary: Option<Value> = None;
+    if let Ok(v) = post_json(
+        app,
+        &format!("/api/videos/{video_id}/episodes/{ep}/playback"),
+        json!({}),
+    )
+    .await
+    {
+        if !play_url_of(&v).is_empty() {
+            return Ok(v);
+        }
+        primary = Some(v);
+    }
+    match get_json(app, &format!("/api/videos/{video_id}/play?ep={ep}&page_texts=0")).await {
+        Ok(v) => {
+            if !play_url_of(&v).is_empty() || primary.is_none() {
+                Ok(v)
+            } else {
+                Ok(primary.unwrap())
+            }
+        }
+        Err(e) => match primary {
+            Some(v) => Ok(v),
+            None => Err(e),
+        },
+    }
+}
+
 /// 拉播放列表文本；主列表自动跟随最高码率一档（最多跟 2 层）。
 async fn fetch_media_playlist(start_url: &str) -> Result<(String, Playlist), String> {
     let mut url = start_url.to_string();
@@ -700,14 +757,14 @@ async fn run_task(app: &AppHandle, mgr: &DownloadManager, id: &str) {
     }
 
     // 2) 取新鲜播放地址
-    let play = match get_json(app, &format!("/api/videos/{}/play?ep={}&page_texts=0", task.video_id, task.ep)).await {
+    let play = match fetch_play_info(app, task.video_id, task.ep).await {
         Ok(v) => v,
         Err(e) => {
             fail(mgr, format!("取播放地址失败：{e}"));
             return;
         }
     };
-    let video_url = play.get("video_url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let video_url = play_url_of(&play);
     if video_url.is_empty() {
         fail(mgr, "暂无播放地址".to_string());
         return;
@@ -820,10 +877,11 @@ async fn run_task(app: &AppHandle, mgr: &DownloadManager, id: &str) {
                 // 地址过期（auth_key）时刷新一次播放地址续传
                 if !refreshed && (e.contains("401") || e.contains("403") || e.contains("HTTP 404")) {
                     refreshed = true;
-                    match get_json(app, &format!("/api/videos/{}/play?ep={}&page_texts=0", task.video_id, task.ep)).await {
+                    match fetch_play_info(app, task.video_id, task.ep).await {
                         Ok(p2) => {
-                            if let Some(u2) = p2.get("video_url").and_then(|v| v.as_str()) {
-                                if let Ok((_, pl2)) = fetch_media_playlist(u2).await {
+                            let u2 = play_url_of(&p2);
+                            if !u2.is_empty() {
+                                if let Ok((_, pl2)) = fetch_media_playlist(&u2).await {
                                     if pl2.segs.len() == current_pl.segs.len() {
                                         current_pl = pl2;
                                         continue 'outer;
