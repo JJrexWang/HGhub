@@ -1,7 +1,9 @@
 //! 网络层：与上游站点对话。
 //!
-//! 站点把全部 `/api/**` 调用收敛成 `POST /api/edge/request` 的信封，
-//! 我们只实现这一个入口，其余接口都是「填 path」。
+//! 站点原先把全部 `/api/**` 调用收敛成 `POST /api/edge/request` 的明文信封，
+//! 2026-11 下旬站点停用该网关（所有线路、所有路径一律 503「接口已停用」，
+//! 网页端已改走加密信封 edge-api-crypto）。现改为**直连 REST**：path 即真实
+//! 接口路径、token 仍走 `Authorization: Bearer` 头，响应仍是 `{status, data, msg}`。
 //!
 //! # 代理（用户反馈「浏览器能开、HGhub 打不开」的根因就在这里）
 //!
@@ -19,8 +21,6 @@
 //! 排查手段：环境变量 `HGHUB_PROXY=http://127.0.0.1:7897` 可强制指定代理，
 //! `net_diag` 命令会输出 DNS/HTTP/环境变量快照。
 
-use base64::engine::general_purpose::STANDARD as B64;
-use base64::Engine;
 use once_cell::sync::Lazy;
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -271,47 +271,38 @@ where
     Err(last)
 }
 
-/// 业务请求：走边缘信封。
+/// 业务请求：直连 REST（信封网关已停用，见文件头说明）。
 pub async fn edge(
     method: &str,
     path: &str,
     body: Option<Value>,
     token: Option<&str>,
 ) -> Result<Value, String> {
-    let (encoded, ctype) = match &body {
-        Some(v) => (
-            B64.encode(serde_json::to_vec(v).map_err(|e| e.to_string())?),
-            "application/json",
-        ),
-        None => (String::new(), ""),
-    };
-    let envelope = json!({
-        "method": method,
-        "path": path,
-        "body": encoded,
-        "content_type": ctype,
-    });
-
     let cur = base();
-    let url = format!("{cur}/api/edge/request");
+    let url = format!("{cur}{path}");
     let referer = format!("{cur}/");
     let token = token.map(|s| s.to_string());
+    let method_parsed = reqwest::Method::from_bytes(method.as_bytes())
+        .map_err(|_| format!("不支持的请求方法: {method}"))?;
 
     let value = with_retry(|client: reqwest::Client| {
-        let envelope = envelope.clone();
         let token = token.clone();
         let url = url.clone();
         let referer = referer.clone();
+        let body = body.clone();
+        let method_parsed = method_parsed.clone();
         async move {
             let mut req = client
-                .post(&url)
+                .request(method_parsed, &url)
                 .header("Accept", "application/json")
-                .header("Referer", &referer)
-                .json(&envelope);
+                .header("Referer", &referer);
             if let Some(t) = token.as_deref() {
                 if !t.is_empty() {
                     req = req.header("Authorization", format!("Bearer {t}"));
                 }
+            }
+            if let Some(b) = body {
+                req = req.json(&b);
             }
             let resp = req.send().await.map_err(|e| err_text(&e))?;
             let status = resp.status();
@@ -319,13 +310,25 @@ pub async fn edge(
             if status.as_u16() == 401 || status.as_u16() == 403 {
                 return Err("401".to_string());
             }
-            if !status.is_success() {
-                return Err(format!("HTTP {status}: {}", &text[..text.len().min(160)]));
-            }
             if text.trim().is_empty() {
-                return Ok(Value::Null);
+                if status.is_success() {
+                    return Ok(Value::Null);
+                }
+                return Err(format!("HTTP {status}"));
             }
-            serde_json::from_str::<Value>(&text).map_err(|e| format!("{e}: {}", &text[..text.len().min(160)]))
+            // 直连接口的业务错误走 HTTP 4xx + 标准 {status,msg} JSON：
+            // 只要带 status 字段就原样上交，由外层按 status/msg 判定，
+            // 这样业务错误不会被 with_retry 当成网络错误反复重试。
+            match serde_json::from_str::<Value>(&text) {
+                Ok(v) if v.get("status").and_then(|s| s.as_i64()).is_some() => Ok(v),
+                Ok(v) if status.is_success() => Ok(v),
+                _ if !status.is_success() => Err(format!(
+                    "HTTP {status}: {}",
+                    &text[..text.len().min(160)]
+                )),
+                Ok(_) => unreachable!(),
+                Err(e) => Err(format!("{e}: {}", &text[..text.len().min(160)])),
+            }
         }
     })
     .await?;

@@ -209,22 +209,22 @@ fn open_external(_url: &str) -> Result<(), String> {
 
 /* ───────────────────────── 会话 ───────────────────────── */
 
-/// 探一条线路的业务网关是否可用（主页 200 不算数，必须 /api/edge/request 能通）。
-async fn edge_alive(base_url: &str) -> bool {
-    let envelope = json!({ "method": "GET", "path": "/api/videos", "body": "", "content_type": "" });
-    let url = format!("{base_url}/api/edge/request");
+/// 探一条线路的业务接口是否可用（主页 200 不算数，必须 /api/videos 直连返回 status=1）。
+async fn api_alive(base_url: &str) -> bool {
     let referer = format!("{base_url}/");
     match crate::net::client()
-        .post(&url)
+        .get(format!("{base_url}/api/videos"))
         .header("Accept", "application/json")
         .header("Referer", &referer)
-        .json(&envelope)
         .timeout(Duration::from_secs(6))
         .send()
         .await
     {
-        Ok(r) => r.status().is_success(),
-        Err(_) => false,
+        Ok(r) if r.status().is_success() => match r.json::<Value>().await {
+            Ok(v) => v.get("status").and_then(|s| s.as_i64()) == Some(1),
+            Err(_) => false,
+        },
+        _ => false,
     }
 }
 
@@ -235,10 +235,10 @@ async fn rescue_dead_line() {
     if cur == crate::net::DEFAULT_BASE {
         return;
     }
-    if edge_alive(&cur).await {
+    if api_alive(&cur).await {
         return;
     }
-    if edge_alive(crate::net::DEFAULT_BASE).await {
+    if api_alive(crate::net::DEFAULT_BASE).await {
         let _ = crate::net::set_base(crate::net::DEFAULT_BASE);
     }
 }
