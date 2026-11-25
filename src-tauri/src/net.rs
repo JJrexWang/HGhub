@@ -271,7 +271,50 @@ where
     Err(last)
 }
 
+/// 把一次 HTTP 响应（状态 + 文本）解释成接口 JSON：
+/// 401/403 统一成 "401"；带 status 字段的 JSON 原样上交由 unwrap_data 判定；
+/// 业务错误走 HTTP 4xx + {status,msg} 时不会被误判成网络错误。
+fn interpret_response(status: reqwest::StatusCode, text: &str) -> Result<Value, String> {
+    if status.as_u16() == 401 || status.as_u16() == 403 {
+        return Err("401".to_string());
+    }
+    if text.trim().is_empty() {
+        if status.is_success() {
+            return Ok(Value::Null);
+        }
+        return Err(format!("HTTP {status}"));
+    }
+    match serde_json::from_str::<Value>(text) {
+        Ok(v) if v.get("status").and_then(|s| s.as_i64()).is_some() => Ok(v),
+        Ok(v) if status.is_success() => Ok(v),
+        _ if !status.is_success() => Err(format!(
+            "HTTP {status}: {}",
+            &text[..text.len().min(160)]
+        )),
+        Ok(_) => unreachable!(),
+        Err(e) => Err(format!("{e}: {}", &text[..text.len().min(160)])),
+    }
+}
+
+/// 接口 JSON 的统一收尾：status==1 取 data，否则把 msg 作为错误上抛。
+fn unwrap_data(value: Value) -> Result<Value, String> {
+    if value.is_null() {
+        return Ok(Value::Null);
+    }
+    if value.get("status").and_then(|v| v.as_i64()) == Some(1) {
+        Ok(value.get("data").cloned().unwrap_or(Value::Null))
+    } else {
+        Err(value
+            .get("msg")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("接口返回失败")
+            .to_string())
+    }
+}
+
 /// 业务请求：直连 REST（信封网关已停用，见文件头说明）。
+/// 只用于游客类接口（列表/详情/播放/评论读）；登录态接口走 user_edge。
 pub async fn edge(
     method: &str,
     path: &str,
@@ -307,46 +350,27 @@ pub async fn edge(
             let resp = req.send().await.map_err(|e| err_text(&e))?;
             let status = resp.status();
             let text = resp.text().await.map_err(|e| err_text(&e))?;
-            if status.as_u16() == 401 || status.as_u16() == 403 {
-                return Err("401".to_string());
-            }
-            if text.trim().is_empty() {
-                if status.is_success() {
-                    return Ok(Value::Null);
-                }
-                return Err(format!("HTTP {status}"));
-            }
-            // 直连接口的业务错误走 HTTP 4xx + 标准 {status,msg} JSON：
-            // 只要带 status 字段就原样上交，由外层按 status/msg 判定，
-            // 这样业务错误不会被 with_retry 当成网络错误反复重试。
-            match serde_json::from_str::<Value>(&text) {
-                Ok(v) if v.get("status").and_then(|s| s.as_i64()).is_some() => Ok(v),
-                Ok(v) if status.is_success() => Ok(v),
-                _ if !status.is_success() => Err(format!(
-                    "HTTP {status}: {}",
-                    &text[..text.len().min(160)]
-                )),
-                Ok(_) => unreachable!(),
-                Err(e) => Err(format!("{e}: {}", &text[..text.len().min(160)])),
-            }
+            interpret_response(status, &text)
         }
     })
     .await?;
 
-    if value.is_null() {
-        return Ok(Value::Null);
-    }
+    unwrap_data(value)
+}
 
-    if value.get("status").and_then(|v| v.as_i64()) == Some(1) {
-        Ok(value.get("data").cloned().unwrap_or(Value::Null))
-    } else {
-        Err(value
-            .get("msg")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("接口返回失败")
-            .to_string())
-    }
+/// 登录态业务请求：走 dx150-edge-v1 加密通道（见 edge_client.rs）。
+/// 直连 Bearer 已被站点拒绝（新发的 token 也一样），只有通道内携带的
+/// authorization 会被校验。返回契约与 edge() 一致。
+pub async fn user_edge(
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+    token: Option<&str>,
+) -> Result<Value, String> {
+    let (status, text) = crate::edge_client::user_call(method, path, body, token).await?;
+    let status = reqwest::StatusCode::from_u16(status)
+        .unwrap_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    unwrap_data(interpret_response(status, &text)?)
 }
 
 /// 拉原始字节（图片 / m3u8 / 分片）。

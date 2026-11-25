@@ -1,5 +1,6 @@
 mod api;
 mod download;
+mod edge_client;
 mod lines;
 mod media;
 mod net;

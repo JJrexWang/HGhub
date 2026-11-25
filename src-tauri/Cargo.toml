@@ -1,6 +1,6 @@
 [package]
 name = "huangguo-client"
-version = "1.2.0-enhanced.7"
+version = "1.2.0-enhanced.8"
 description = "HGhub · 黄果短剧客户端"
 authors = ["HGhub"]
 license = "PolyForm-Noncommercial-1.0.0"
@@ -32,6 +32,12 @@ reqwest = { version = "0.12", default-features = false, features = [
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 aes = "0.8"
 base64 = "0.22"
+# dx150-edge-v1 加密通道（src/edge_client.rs）：ECDH P-256 + HKDF-SHA256 + AES-256-GCM
+p256 = { version = "0.13", features = ["ecdh"] }
+hkdf = "0.12"
+sha2 = "0.10"
+aes-gcm = "0.10"
+rand_core = { version = "0.6", features = ["getrandom"] }
 percent-encoding = "2"
 once_cell = "1"
 url = "2"

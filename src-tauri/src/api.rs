@@ -1,6 +1,6 @@
 //! 业务命令：登录 / 列表 / 详情 / 播放 / 互动。
 
-use crate::net::{base, edge};
+use crate::net::{base, edge, user_edge};
 use crate::session::SessionStore;
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -36,7 +36,13 @@ impl Api {
         let token = self
             .token()
             .ok_or_else(|| "请先登录".to_string())?;
-        edge(method, path, body, Some(&token)).await
+        user_edge(method, path, body, Some(&token)).await
+    }
+
+    /// 登录态 GET（me / 收藏列表）：直连 Bearer 已被站点拒绝，必须走加密通道。
+    async fn uget(&self, path: &str) -> Result<Value, String> {
+        let token = self.token();
+        user_edge("GET", path, None, token.as_deref()).await
     }
 }
 
@@ -259,7 +265,7 @@ pub async fn api_login(
     username: String,
     password: String,
 ) -> Result<Value, String> {
-    let data = edge(
+    let data = user_edge(
         "POST",
         "/api/account/loginByPassword",
         Some(json!({ "username": username, "password": password })),
@@ -291,7 +297,7 @@ pub async fn api_register(
     if !email.trim().is_empty() {
         body["email"] = json!(email);
     }
-    let data = edge("POST", "/api/account/registerByPassword", Some(body), None).await?;
+    let data = user_edge("POST", "/api/account/registerByPassword", Some(body), None).await?;
     let token = data
         .get("token")
         .and_then(|v| v.as_str())
@@ -305,14 +311,14 @@ pub async fn api_register(
 #[tauri::command]
 pub async fn api_logout(state: State<'_, Api>) -> Result<Value, String> {
     let token = state.token();
-    let _ = edge("POST", "/api/account/logout", None, token.as_deref()).await;
+    let _ = user_edge("POST", "/api/account/logout", None, token.as_deref()).await;
     state.session.clear();
     Ok(json!({ "ok": true }))
 }
 
 #[tauri::command]
 pub async fn api_me(state: State<'_, Api>) -> Result<Value, String> {
-    let me = state.get("/api/account/me").await?;
+    let me = state.uget("/api/account/me").await?;
     if let Some(user) = state.session.token() {
         state.session.set(user, me.clone());
     }
@@ -507,7 +513,7 @@ pub async fn api_collect(
 #[tauri::command]
 pub async fn api_collects(state: State<'_, Api>, page: u32, size: u32) -> Result<Value, String> {
     state
-        .get(&format!("/api/users/me/collects?page={page}&size={size}"))
+        .uget(&format!("/api/users/me/collects?page={page}&size={size}"))
         .await
 }
 
