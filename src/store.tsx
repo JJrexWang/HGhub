@@ -161,6 +161,8 @@ type Store = {
   favCards: FavCard[];
   /** 网站收藏是否已同步成功（登录且为 true 时 favs 以网站为准） */
   favsSynced: boolean;
+  /** 最近一次收藏同步失败的原因（null = 没失败）；"401" 表示登录已过期 */
+  favSyncError: string | null;
   /** 重新从网站拉取收藏（登录状态下） */
   syncFavs: () => Promise<void>;
   isLiked: (id: number) => boolean; isFav: (id: number) => boolean;
@@ -219,6 +221,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [remoteFavs, setRemoteFavs] = useState<number[] | null>(null);
   const [favCards, setFavCards] = useState<FavCard[]>([]);
   const [favsSynced, setFavsSynced] = useState(false);
+  const [favSyncError, setFavSyncError] = useState<string | null>(null);
+  const syncingFavsRef = useRef(false);
   const userRef = useRef<User | null>(null);
   const pRef = useRef(p);
   const remoteFavsRef = useRef<number[] | null>(null);
@@ -239,12 +243,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     try { localStorage.setItem(LS, JSON.stringify(p)); } catch { /* ignore */ }
   }, [p]);
 
-  useEffect(() => {
-    api.boot()
-      .then((r) => { if (r.user && (r.user as User).id) setUser(r.user as User); })
-      .catch(() => { /* 离线也能用 */ });
-  }, []);
-
   const refreshDownloads = useCallback(async () => {
     try {
       const list = await api.dlList();
@@ -255,7 +253,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   /** 从网站拉取当前账号的全部收藏（分页聚合），成功后 favs 以网站为准。 */
   const syncFavs = useCallback(async () => {
-    if (!userRef.current) return;
+    if (!userRef.current || syncingFavsRef.current) return;
+    syncingFavsRef.current = true;
     try {
       const parsed: CollectItem[] = [];
       const seenKey = new Set<string>();
@@ -311,9 +310,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setRemoteFavs(ids);
       setFavCards(cards);
       setFavsSynced(true);
-    } catch {
-      /* 同步失败不清空既有镜像；从未成功时 favs 回落本地，Profile 里可重试 */
+      setFavSyncError(null);
+    } catch (e) {
+      /* 同步失败不清空既有镜像；从未成功时 favs 回落本地，Profile 里可重试。
+         失败原因要留下来给界面看：笼统写「网络不通」会把登录过期这类真因盖住。 */
       setFavsSynced(false);
+      setFavSyncError((e as Error)?.message || "同步失败");
+    } finally {
+      syncingFavsRef.current = false;
     }
   }, []);
 
@@ -327,6 +331,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setRemoteFavs(null);
       setFavCards([]);
       setFavsSynced(false);
+      setFavSyncError(null);
     }
   }, [uid, syncFavs]);
 
@@ -343,6 +348,30 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const id = ++toastSeq.current;
     setToasts((t) => [...t.slice(-2), { id, msg, icon }]);
     window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 2200);
+  }, []);
+
+  /* 启动恢复会话后立刻校验登录态：本地存的 token 可能已过期，boot 只回存量
+     用户、不校验就会「假装在线」——所有带登录态的请求都 401，收藏同步最先遭殃，
+     且界面只会误报「网络不通」。/me 成功顺带刷新 counts/interactions；
+     明确 401 才清会话并提示重登，网络错误不动会话（离线可用）。 */
+  useEffect(() => {
+    api.boot()
+      .then(async (r) => {
+        if (!r.user || !(r.user as User).id) return;
+        setUser(r.user as User);
+        try {
+          const me = await api.me();
+          if (me && me.id) setUser(me);
+        } catch (e) {
+          if ((e as Error)?.message === "401") {
+            try { await api.logout(); } catch { /* 本地会话已清即可 */ }
+            setUser(null);
+            toast("登录已过期，请重新登录", "info");
+          }
+        }
+      })
+      .catch(() => { /* 离线也能用 */ });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /* ── 已下载作品的线上更新 ───────────────────────────────────
@@ -556,7 +585,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     tab, setTab, stack, push, pop,
     user, setUser, loginOpen, setLoginOpen, logout,
     likes: p.likes, favs: effFavs, history: p.history, follows: p.follows,
-    favCards, favsSynced, syncFavs,
+    favCards, favsSynced, favSyncError, syncFavs,
     isLiked: (id) => p.likes.includes(id),
     isFav: (id) => effFavs.includes(id),
     toggleLikeLocal, toggleFavLocal, toggleFollowLocal, addHistory, clearHistory,
@@ -568,7 +597,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     dlSnap: p.dlSnap, dlNewEps: (videoId: number) => newEpsOf(downloads, p.dlSnap, videoId),
     dlChecking, checkDlUpdates, bulk, downloadAllFavs, updateDownloaded,
   }), [theme, tab, setTab, stack, push, pop, user, loginOpen, logout,
-    p, effFavs, remoteFavs, favCards, favsSynced, syncFavs,
+    p, effFavs, remoteFavs, favCards, favsSynced, favSyncError, syncFavs,
     toggleLikeLocal, toggleFavLocal, toggleFollowLocal, addHistory, clearHistory,
     setMuted, setVolume, addSearch, clearSearchHist, toasts, toast, theater, setTheater, fs, setFs,
     downloads, refreshDownloads, dlChecking, checkDlUpdates, bulk, downloadAllFavs, updateDownloaded]);

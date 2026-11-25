@@ -480,14 +480,28 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
     const on = toggleLikeLocal(curId);
     setHeartBurst((n) => n + 1);
     toast(on ? "已加入喜欢" : "已取消喜欢", on ? "heart" : "info");
-    if (requireLogin()) { if (kind === "post") api.postLike(curId, on).catch(() => {}); else api.like(curId, curEp, on).catch(() => {}); }
+    if (requireLogin()) {
+      const req = kind === "post" ? api.postLike(curId, on) : api.like(curId, curEp, on);
+      req.catch((e) => {
+        /* 写网站失败必须回滚本地状态并明示：静默吞掉会让界面显示已同步、
+           下次拉取又被网站状态盖回去，看起来就是「同步不正常」 */
+        toggleLikeLocal(curId);
+        toast((e as Error)?.message === "401" ? "登录已过期，喜欢未同步" : "喜欢同步失败，已回滚", "info");
+      });
+    }
   };
 
   const onFav = () => {
     if (!curId) return;
     const on = toggleFavLocal(curId);
     toast(on ? "已收藏" : "已取消收藏", on ? "star" : "info");
-    if (requireLogin()) { if (kind === "post") api.postCollect(curId, on).catch(() => {}); else api.collect(curId, on).catch(() => {}); }
+    if (requireLogin()) {
+      const req = kind === "post" ? api.postCollect(curId, on) : api.collect(curId, on);
+      req.catch((e) => {
+        toggleFavLocal(curId);
+        toast((e as Error)?.message === "401" ? "登录已过期，收藏未同步" : "收藏同步失败，已回滚", "info");
+      });
+    }
   };
 
   /* 下载本集：没有任务→入队；排队/下载中→去管理页；暂停/失败→续传；已完成→提示 */

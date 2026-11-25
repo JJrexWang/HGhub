@@ -9,10 +9,17 @@ import { IChevR, IClock, IDownload, ILogout, ISettings, IStar, IUser } from "../
    收藏：已登录时以网站收藏为准（进应用/登录后自动同步），未登录用本地收藏；
    观看记录仍是本地的。未登录时资料卡本身就是登录入口。 */
 export default function Profile({ wide }: { wide: boolean }) {
-  const { user, setLoginOpen, logout, history, favs, favCards, favsSynced, syncFavs, clearHistory, push, downloads, bulk, downloadAllFavs, dlNewEps } = useStore();
+  const { user, setLoginOpen, logout, history, favs, favCards, favsSynced, favSyncError, syncFavs, clearHistory, push, downloads, bulk, downloadAllFavs, dlNewEps } = useStore();
   const [tab, setTab] = useState<"fav" | "history" | "dl">("fav");
   const [cards, setCards] = useState<FavCard[]>([]);
   const [loading, setLoading] = useState(false);
+
+  /* 每次进「我的」都顺手重同步一次网站收藏（store 里有防重入）：
+     以前只在登录/启动时拉一次，网页端新加的收藏在 App 里永远不出现 */
+  useEffect(() => {
+    if (user) void syncFavs();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const ids = tab === "fav" ? favs : tab === "history" ? history.map((h) => h.id) : [];
   /** 下载按作品聚合（已完成集） */
@@ -197,10 +204,17 @@ export default function Profile({ wide }: { wide: boolean }) {
             </>
           ) : (
             tab === "fav" && user && !favsSynced ? (
-              <Empty icon={<IStar size={24} />}
-                title="网站收藏还没同步上"
-                sub="网络不通时这里先按本地收藏显示，恢复后点重试同步网站收藏"
-                action="重试同步" onAction={() => { void syncFavs(); }} />
+              favSyncError === "401" ? (
+                <Empty icon={<IStar size={24} />}
+                  title="登录已过期"
+                  sub="本地登录态已失效，网站收藏同步不了。重新登录后即可恢复同步"
+                  action="重新登录" onAction={() => { void logout().then(() => setLoginOpen(true)); }} />
+              ) : (
+                <Empty icon={<IStar size={24} />}
+                  title="网站收藏还没同步上"
+                  sub={favSyncError ? `同步失败：${favSyncError}` : "网络不通时这里先按本地收藏显示，恢复后点重试同步网站收藏"}
+                  action="重试同步" onAction={() => { void syncFavs(); }} />
+              )
             ) : (
               <Empty icon={tab === "fav" ? <IStar size={24} /> : <IClock size={24} />}
                 title={tab === "fav" ? "还没有收藏" : "还没有观看记录"}
