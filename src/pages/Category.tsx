@@ -6,6 +6,10 @@ import { Masonry, RowCard } from "../components/cards";
 import { Empty, Img } from "../components/ui";
 import { IBack, IChevR, IGrid, ITrophy } from "../icons";
 
+/* 频道候选与文案：频道名单以站点 /api/site/categories/video 为准（与官网同步），
+   本地表只作接口不可用时的兜底 + 已知频道的展示名/描述覆盖。
+   注意：注册表里在列 ≠ 有内容——换脸/魔改的分类接口已回「内容已下线」，
+   总览按「实际拉到内容」过滤，下线或为空的频道不展示。 */
 export const CHANNELS = [
   { cate: "ai-duanju", name: "AI成人短剧", desc: "高能反转 · 一口气看完" },
   { cate: "ai-manju", name: "AI成人漫剧", desc: "国创漫剧 · 每周更新" },
@@ -13,46 +17,96 @@ export const CHANNELS = [
   { cate: "ai-mogai", name: "AI魔改", desc: "魔改名场面 · 脑洞大开" },
 ] as const;
 
+type Channel = { cate: string; name: string; desc: string };
+
+const POOL = 24; // 每行预拉取上限，实际展示数按容器宽度切片
+const CARD_W = 104;
+const GAP = 10;
+
+/** 按容器宽度算一行能放下几张卡（分类行与吃瓜行共用同一个页面宽度）。 */
+function useFitCount() {
+  const ref = useRef<HTMLDivElement>(null);
+  const [fit, setFit] = useState(8);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const update = () => {
+      const w = el.clientWidth - 32; // 行内 px-4 两侧留白
+      setFit(Math.max(3, Math.min(POOL, Math.floor((w + GAP) / (CARD_W + GAP)))));
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  return [ref, fit] as const;
+}
+
 /* ================= 分类总览 ================= */
 export default function Category({ wide }: { wide: boolean }) {
   const { push } = useStore();
+  const [channels, setChannels] = useState<Channel[]>([]);
   const [rows, setRows] = useState<Record<string, VideoCard[]>>({});
   const [posts, setPosts] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
+  const [scrollRef, fit] = useFitCount();
 
   useEffect(() => {
     let alive = true;
     (async () => {
+      // 1) 频道名单与官网同步：优先站点注册表，失败回落本地表
+      let list: Channel[] = CHANNELS.map((c) => ({ ...c }));
+      try {
+        const res = await api.siteCategories();
+        const items = (res?.items || []).filter((i) => i.route);
+        if (items.length) {
+          list = [...items]
+            .sort((a, b) => (b.sort || 0) - (a.sort || 0))
+            .map((i) => {
+              const local = CHANNELS.find((c) => c.cate === i.route);
+              return {
+                cate: i.route,
+                name: local?.name || i.name,
+                desc: local?.desc || "精选内容 · 持续上新",
+              };
+            });
+        }
+      } catch { /* 用本地兜底表 */ }
+      // 2) 逐频道拉首屏：报错（已下线）或空的频道不进总览
       const entries = await Promise.all(
-        CHANNELS.map(async (c) => {
+        list.map(async (c) => {
           try {
-            const res = await api.category(c.cate, 1, 8);
-            return [c.cate, res?.items || []] as const;
+            const res = await api.category(c.cate, 1, POOL);
+            return [c, res?.items || []] as const;
           } catch {
-            return [c.cate, [] as VideoCard[]] as const;
+            return [c, [] as VideoCard[]] as const;
           }
         }),
       );
       let p: Post[] = [];
-      try { p = (await api.posts(1, 8))?.items || []; } catch { p = []; }
+      try { p = (await api.posts(1, POOL))?.items || []; } catch { p = []; }
       if (!alive) return;
-      setRows(Object.fromEntries(entries));
+      const visible = entries.filter(([, items]) => items.length > 0);
+      setChannels(visible.map(([c]) => c));
+      setRows(Object.fromEntries(visible.map(([c, items]) => [c.cate, items])));
       setPosts(p);
       setLoading(false);
     })();
     return () => { alive = false; };
   }, []);
 
+  const channelCount = channels.length + (posts.length ? 1 : 0) + 1;
+
   return (
     <div className="absolute inset-0 bg-bg flex flex-col">
       <div className="shrink-0 px-4 pb-1" style={{ paddingTop: "calc(var(--sat, 0px) + 14px)" }}>
         <div className="flex items-end gap-2.5">
           <span className="text-[24px] font-bold text-on leading-none">分类</span>
-          <span className="text-[11px] text-mut pb-0.5">{CHANNELS.length + 1} 个频道 · 每周持续上新</span>
+          <span className="text-[11px] text-mut pb-0.5">{loading ? "每周持续上新" : `${channelCount} 个频道 · 每周持续上新`}</span>
         </div>
       </div>
 
-      <div className="flex-1 scroll-y pb-24 pt-2">
+      <div ref={scrollRef} className="flex-1 scroll-y pb-24 pt-2">
         {/* 排行榜入口 */}
         <button onClick={() => push({ kind: "ranks" })}
           className="mx-4 mb-5 w-[calc(100%-2rem)] flex items-center gap-3 rounded-(--r-md) bg-s2 p-3.5 text-left pressable elev-1">
@@ -64,8 +118,10 @@ export default function Category({ wide }: { wide: boolean }) {
           <IChevR size={16} className="text-mut" />
         </button>
 
-        {CHANNELS.map((c, ci) => {
-          const list = rows[c.cate] || [];
+        {loading && <div className="flex justify-center py-10"><div className="w-8 h-8 spinner" /></div>}
+
+        {!loading && channels.map((c, ci) => {
+          const list = (rows[c.cate] || []).slice(0, fit);
           return (
             <section key={c.cate} className="mb-5 a-rise" style={{ animationDelay: `${Math.min(ci * 50, 300)}ms` }}>
               <button onClick={() => push({ kind: "channel", cate: c.cate, name: c.name })}
@@ -85,13 +141,13 @@ export default function Category({ wide }: { wide: boolean }) {
                 {list.map((v) => (
                   <RowCard key={v.id} v={v} onOpen={() => push({ kind: "feed", videoIds: list.map((x) => x.id), index: list.findIndex((x) => x.id === v.id), title: c.name })} />
                 ))}
-                {!list.length && <div className="h-[150px] flex items-center text-[11.5px] text-dim px-1">{loading ? "加载中…" : "暂无内容"}</div>}
               </div>
             </section>
           );
         })}
 
-        {/* 吃瓜 */}
+        {/* 吃瓜：有内容才展示 */}
+        {!loading && posts.length > 0 && (
         <section className="mb-5 a-rise">
           <button onClick={() => push({ kind: "posts" })}
             className="w-full flex items-center gap-2.5 px-4 mb-2.5 text-left pressable group">
@@ -107,7 +163,7 @@ export default function Category({ wide }: { wide: boolean }) {
             </span>
           </button>
           <div className="scroll-x flex gap-2.5 px-4 snap-x">
-            {posts.map((post) => (
+            {posts.slice(0, fit).map((post) => (
               <button key={post.id} onClick={() => push({ kind: "post", id: post.id })}
                 className="w-[104px] shrink-0 text-left snap-start pressable">
                 <div className="relative w-full rounded-(--r-sm) overflow-hidden bg-s1 elev-1" style={{ paddingTop: "133%" }}>
@@ -118,11 +174,11 @@ export default function Category({ wide }: { wide: boolean }) {
                 <div className="mt-1.5 text-[11.5px] font-medium text-on clamp-1 leading-tight">{post.title}</div>
               </button>
             ))}
-            {!posts.length && <div className="h-[150px] flex items-center text-[11.5px] text-dim px-1">{loading ? "加载中…" : "暂无内容"}</div>}
           </div>
         </section>
+        )}
 
-        <div className="px-4 text-center text-[10.5px] text-dim pt-1">— 已展示全部频道 —</div>
+        {!loading && <div className="px-4 text-center text-[10.5px] text-dim pt-1">— 已展示全部频道 —</div>}
       </div>
       {wide && <div />}
     </div>

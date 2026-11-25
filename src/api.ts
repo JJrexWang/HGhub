@@ -59,6 +59,8 @@ export const api = {
   feed: (page = 1, size = 20) => call<Paged<VideoCard>>("api_feed", { page, size }),
   category: (cate: string, page = 1, size = 20) =>
     call<Paged<VideoCard>>("api_category", { cate, page, size }),
+  siteCategories: () =>
+    call<{ items: { id: number; name: string; route: string; sort: number }[] }>("api_site_categories"),
   rank: (kind: "hot" | "recommend" | "potential") =>
     call<{ type: string; items: RankItem[] }>("api_rank", { kind }),
   search: (q: string, page = 1, size = 20) =>

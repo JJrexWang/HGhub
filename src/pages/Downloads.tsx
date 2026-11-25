@@ -3,7 +3,7 @@ import { api, fmtBytes, platform } from "../api";
 import type { DlTask } from "../types";
 import { useStore } from "../store";
 import { Empty, Img, Modal } from "../components/ui";
-import { IBack, ICheck, IChevR, IDownload, IPauseF, IPlayF, IRefresh, ISearch, ITrash } from "../icons";
+import { IBack, ICheck, IDownload, IPauseF, IPlayF, IRefresh, ISearch, ITrash } from "../icons";
 
 /* 下载管理（两级）：
    一级 = 作品列表（封面/已下集数/大小/更新徽标），可整部更新、整部删除、批量删作品；
@@ -304,26 +304,34 @@ export default function Downloads({ onBack, wide }: { onBack: () => void; wide: 
           </div>
 
           <div className="flex-1 scroll-y px-4 pb-10">
-            <div className={wide ? "max-w-[820px] mx-auto" : ""}>
+            <div>
               {works.length > 0 ? (
-                <div className="flex flex-col gap-2.5 mt-1">
+                <div className="grid gap-2.5 mt-1" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(168px, 1fr))" }}>
                   {works.map((w) => {
                     const dlTask = w.tasks.find((t) => t.status === "downloading");
                     const pct = dlTask?.segs_total ? Math.min(100, Math.floor((dlTask.segs_done / dlTask.segs_total) * 100)) : 0;
+                    const picked = selectedWorks.has(w.video_id);
                     return (
                       <div key={w.video_id} onClick={() => { if (selectMode) toggleWorkSel(w.video_id); else { setWorkId(w.video_id); exitSelect(); } }}
-                        className="rounded-(--r-md) bg-s2 overflow-hidden flex items-center gap-3 px-3.5 py-3 pressable cursor-pointer">
-                        {selectMode && (
-                          <span className={`w-5 h-5 rounded-md flex items-center justify-center shrink-0 ${selectedWorks.has(w.video_id) ? "bg-primary text-on-primary" : "bg-s4 text-transparent"}`}>
-                            <ICheck size={12} />
-                          </span>
-                        )}
-                        <div className="relative w-11 h-[58px] rounded-(--r-sm) overflow-hidden bg-s3 shrink-0">
+                        className="rounded-(--r-md) bg-s2 overflow-hidden pressable cursor-pointer"
+                        style={selectMode && picked ? { boxShadow: "inset 0 0 0 2px var(--p-primary)" } : undefined}>
+                        <div className="relative w-full bg-s3" style={{ paddingTop: "133%" }}>
                           {w.cover && <Img src={w.cover} />}
-                          {w.newEps.length > 0 && (
-                            <span className="absolute top-1 left-1 px-1.5 py-0.5 rounded-full bg-[#e5534b] text-[9px] font-semibold text-white leading-none">
+                          {selectMode ? (
+                            <span className={`absolute top-1.5 left-1.5 w-5 h-5 rounded-md flex items-center justify-center ${picked ? "bg-primary text-on-primary" : "bg-black/55 text-transparent"}`}>
+                              <ICheck size={12} />
+                            </span>
+                          ) : w.newEps.length > 0 ? (
+                            <span className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded-full bg-[#e5534b] text-[9px] font-semibold text-white leading-none">
                               更新 {w.newEps.length} 集
                             </span>
+                          ) : null}
+                          {!selectMode && (
+                            <button onClick={(e) => {
+                              e.stopPropagation();
+                              setConfirm({ text: `删除《${w.title}》的全部 ${w.tasks.length} 集下载文件与任务？`, run: () => act(api.dlRemoveWork(w.video_id), "已删除整部") });
+                            }}
+                              aria-label="删整部" className="absolute top-1.5 right-1.5 w-7 h-7 rounded-full bg-black/55 flex items-center justify-center text-white/90 pressable"><ITrash size={13} /></button>
                           )}
                           {dlTask && (
                             <span className="absolute inset-x-0 bottom-0 h-[3px] bg-black/40">
@@ -331,32 +339,23 @@ export default function Downloads({ onBack, wide }: { onBack: () => void; wide: 
                             </span>
                           )}
                         </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="text-[13px] font-semibold text-on truncate">{w.title}</div>
+                        <div className="px-2.5 py-2">
+                          <div className="text-[12.5px] font-semibold text-on truncate">{w.title}</div>
                           <div className="text-[10.5px] text-mut mt-0.5">
-                            已下 {w.doneTasks.length}{w.total_episodes ? ` / ${w.total_episodes}` : ""} 集 · {fmtBytes(w.size)} · 最近 {fmtDate(w.latest)}
+                            已下 {w.doneTasks.length}{w.total_episodes ? ` / ${w.total_episodes}` : ""} 集 · {fmtBytes(w.size)}
                           </div>
-                          {(w.activeTasks.length > 0 || w.failedCount > 0) && (
-                            <div className="text-[10.5px] mt-0.5">
-                              {w.activeTasks.length > 0 && <span className="text-primary font-medium">{w.activeTasks.some((t) => t.status === "downloading") ? "下载中" : "队列中"} {w.activeTasks.length} 集</span>}
-                              {w.failedCount > 0 && <span className="text-[#e5534b]"> · {w.failedCount} 集失败</span>}
-                            </div>
-                          )}
+                          <div className="flex items-center gap-1.5 mt-0.5 min-h-[18px]">
+                            <span className="text-[10.5px] text-mut">最近 {fmtDate(w.latest)}</span>
+                            {w.activeTasks.length > 0 && <span className="text-primary font-medium text-[10.5px]">{w.activeTasks.some((t) => t.status === "downloading") ? "下载中" : "队列中"} {w.activeTasks.length} 集</span>}
+                            {w.failedCount > 0 && <span className="text-[#e5534b] text-[10.5px]">{w.failedCount} 集失败</span>}
+                            {w.newEps.length > 0 && !selectMode && (
+                              <button onClick={(e) => { e.stopPropagation(); act(api.dlEnqueueSeries(w.video_id, w.newEps), `已入队 ${w.newEps.length} 集新集`); }}
+                                className="ml-auto flex items-center gap-1 h-6 px-2 rounded-full bg-[#e5534b] text-white text-[10.5px] font-semibold pressable shrink-0">
+                                <IDownload size={11} />更新
+                              </button>
+                            )}
+                          </div>
                         </div>
-                        {w.newEps.length > 0 && !selectMode && (
-                          <button onClick={(e) => { e.stopPropagation(); act(api.dlEnqueueSeries(w.video_id, w.newEps), `已入队 ${w.newEps.length} 集新集`); }}
-                            className="flex items-center gap-1 h-8 px-2.5 rounded-(--r-ctl) bg-[#e5534b] text-white text-[11px] font-semibold pressable shrink-0">
-                            <IDownload size={12} />更新
-                          </button>
-                        )}
-                        {!selectMode && (
-                          <button onClick={(e) => {
-                            e.stopPropagation();
-                            setConfirm({ text: `删除《${w.title}》的全部 ${w.tasks.length} 集下载文件与任务？`, run: () => act(api.dlRemoveWork(w.video_id), "已删除整部") });
-                          }}
-                            aria-label="删整部" className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-mut pressable shrink-0"><ITrash size={14} /></button>
-                        )}
-                        <IChevR size={16} className="text-dim shrink-0" />
                       </div>
                     );
                   })}

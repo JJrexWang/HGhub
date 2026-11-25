@@ -115,6 +115,7 @@ pub fn run() {
             api::api_me,
             api::api_feed,
             api::api_category,
+            api::api_site_categories,
             api::api_rank,
             api::api_search,
             api::cache_clear,

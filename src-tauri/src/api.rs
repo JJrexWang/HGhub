@@ -334,6 +334,12 @@ pub async fn api_feed(state: State<'_, Api>, page: u32, size: u32) -> Result<Val
         .await
 }
 
+/// 站点频道注册表（与官网同步的分类来源；内容是否下线由各分类接口决定）。
+#[tauri::command]
+pub async fn api_site_categories(state: State<'_, Api>) -> Result<Value, String> {
+    state.get("/api/site/categories/video").await
+}
+
 #[tauri::command]
 pub async fn api_category(
     state: State<'_, Api>,

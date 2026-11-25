@@ -135,7 +135,7 @@ export default function Profile({ wide }: { wide: boolean }) {
                     {dlActive} 个任务下载中，点此查看进度
                   </button>
                 )}
-                <div className="grid grid-cols-3 gap-2">
+                <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(104px, 1fr))" }}>
                   {dlWorks.map((w) => (
                     <button key={w.video_id} onClick={() => push({
                       kind: "feed", videoIds: [w.video_id], index: 0, title: w.title, startEp: w.firstEp,
@@ -178,7 +178,7 @@ export default function Profile({ wide }: { wide: boolean }) {
                 {!bulk && <span className="text-[10.5px] font-normal opacity-80">已下载的集自动跳过</span>}
               </button>
             )}
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(104px, 1fr))" }}>
               {cards.map((c) => {
                 const p = progressOf(c.id);
                 return (
