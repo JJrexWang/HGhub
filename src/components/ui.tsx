@@ -141,8 +141,8 @@ export function CloseBtn({ onClick }: { onClick: () => void }) {
 }
 
 /* ——— 图片（骨架 + 渐显，自动走本地解密协议） ——— */
-export function Img({ src, alt = "", className = "", eager = false, raw = false }: {
-  src: string; alt?: string; className?: string; eager?: boolean; raw?: boolean;
+export function Img({ src, alt = "", className = "", eager = false, raw = false, onError }: {
+  src: string; alt?: string; className?: string; eager?: boolean; raw?: boolean; onError?: () => void;
 }) {
   const [ok, setOk] = useState(false);
   const [err, setErr] = useState(false);
@@ -151,7 +151,7 @@ export function Img({ src, alt = "", className = "", eager = false, raw = false 
     <div className={`absolute inset-0 overflow-hidden ${className}`}>
       {!ok && !err && <div className="absolute inset-0 shimmer" />}
       {err && <div className="absolute inset-0 bg-s3" />}
-      <img src={url} alt={alt} loading={eager ? "eager" : "lazy"} onLoad={() => setOk(true)} onError={() => setErr(true)}
+      <img src={url} alt={alt} loading={eager ? "eager" : "lazy"} onLoad={() => setOk(true)} onError={() => { setErr(true); onError?.(); }}
         className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-300 ${ok ? "opacity-100" : "opacity-0"}`} draggable={false} />
     </div>
   );

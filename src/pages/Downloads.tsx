@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, fmtBytes, platform } from "../api";
 import type { DlTask } from "../types";
 import { useStore } from "../store";
@@ -61,7 +61,7 @@ export default function Downloads({ onBack, wide }: { onBack: () => void; wide: 
       return {
         video_id,
         title: (doneTasks[0] || sorted[0]).title || `作品 ${video_id}`,
-        cover: (doneTasks[0] || sorted[0]).cover,
+        cover: (doneTasks.find((t) => t.cover) || sorted.find((t) => t.cover))?.cover || "",
         tasks: sorted,
         doneTasks,
         activeTasks: sorted.filter((t) => t.status === "downloading" || t.status === "queued" || t.status === "paused"),
@@ -77,6 +77,31 @@ export default function Downloads({ onBack, wide }: { onBack: () => void; wide: 
     else list.sort((a, b) => b.latest - a.latest);
     return list;
   }, [downloads, q, sort, dlSnap, dlNewEps]);
+
+  /* 封面补齐：任务里存的封面可能为空（早期入队没拿到）或地址已失效，
+     缺图/加载失败时按作品 id 拉一次详情用最新封面补上（每部只试一次，分批进行）。 */
+  const [coverFill, setCoverFill] = useState<Record<number, string>>({});
+  const coverTried = useRef<Set<number>>(new Set());
+  const fillCover = (id: number) => {
+    if (coverTried.current.has(id)) return;
+    coverTried.current.add(id);
+    api.video(id).then((d) => { if (d?.cover) setCoverFill((m) => ({ ...m, [id]: d.cover })); }).catch(() => {});
+  };
+  useEffect(() => {
+    const missing = works.filter((w) => !w.cover && !coverFill[w.video_id] && !coverTried.current.has(w.video_id));
+    if (!missing.length) return;
+    let alive = true;
+    (async () => {
+      for (let i = 0; i < missing.length && alive; i += 8) {
+        await Promise.allSettled(missing.slice(i, i + 8).map((w) => {
+          coverTried.current.add(w.video_id);
+          return api.video(w.video_id).then((d) => { if (alive && d?.cover) setCoverFill((m) => ({ ...m, [w.video_id]: d.cover })); });
+        }));
+      }
+    })();
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [works]);
 
   const doneCount = downloads.filter((t) => t.status === "done").length;
   const totalBytes = downloads.filter((t) => t.status === "done").reduce((s, t) => s + t.size, 0);
@@ -136,7 +161,7 @@ export default function Downloads({ onBack, wide }: { onBack: () => void; wide: 
           <div className="shrink-0 px-3 pt-2 pb-3 flex items-center gap-2" style={{ paddingTop: "calc(var(--sat, 0px) + 10px)" }}>
             <button onClick={() => { setWorkId(null); exitSelect(); }} aria-label="返回作品列表" className="w-10 h-10 rounded-full flex items-center justify-center text-on hover:bg-s3 pressable"><IBack size={20} /></button>
             <div className="relative w-9 h-[46px] rounded-(--r-sm) overflow-hidden bg-s3 shrink-0">
-              {sel.cover && <Img src={sel.cover} />}
+              {(coverFill[sel.video_id] || sel.cover) && <Img src={coverFill[sel.video_id] || sel.cover} onError={() => fillCover(sel.video_id)} />}
             </div>
             <div className="flex-1 min-w-0">
               <div className="text-[16px] font-bold text-on leading-tight truncate">{sel.title}</div>
@@ -316,7 +341,7 @@ export default function Downloads({ onBack, wide }: { onBack: () => void; wide: 
                         className="rounded-(--r-md) bg-s2 overflow-hidden pressable cursor-pointer"
                         style={selectMode && picked ? { boxShadow: "inset 0 0 0 2px var(--p-primary)" } : undefined}>
                         <div className="relative w-full bg-s3" style={{ paddingTop: "133%" }}>
-                          {w.cover && <Img src={w.cover} />}
+                          {(coverFill[w.video_id] || w.cover) && <Img src={coverFill[w.video_id] || w.cover} onError={() => fillCover(w.video_id)} />}
                           {selectMode ? (
                             <span className={`absolute top-1.5 left-1.5 w-5 h-5 rounded-md flex items-center justify-center ${picked ? "bg-primary text-on-primary" : "bg-black/55 text-transparent"}`}>
                               <ICheck size={12} />

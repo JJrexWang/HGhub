@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, APP_VERSION, fmt, fmtBytes, fmtTime, platform } from "../api";
 import type { FavCard } from "../types";
 import { useStore } from "../store";
@@ -28,6 +28,7 @@ export default function Profile({ wide }: { wide: boolean }) {
     for (const t of downloads) {
       if (t.status !== "done") continue;
       const w = map.get(t.video_id) || { title: t.title, cover: t.cover, eps: [], size: 0, firstEp: t.ep };
+      if (!w.cover && t.cover) w.cover = t.cover;
       w.eps.push(t.ep);
       w.size += t.size;
       w.firstEp = Math.min(w.firstEp, t.ep);
@@ -36,6 +37,19 @@ export default function Profile({ wide }: { wide: boolean }) {
     return [...map.entries()].map(([video_id, w]) => ({ video_id, ...w }));
   })();
   const dlActive = downloads.filter((t) => t.status === "downloading" || t.status === "queued").length;
+  /* 下载封面补齐：任务存的封面可能为空或已失效，缺图/加载失败时拉详情补最新封面（每部只试一次） */
+  const [dlCoverFill, setDlCoverFill] = useState<Record<number, string>>({});
+  const dlCoverTried = useRef<Set<number>>(new Set());
+  const fillDlCover = (id: number) => {
+    if (dlCoverTried.current.has(id)) return;
+    dlCoverTried.current.add(id);
+    api.video(id).then((d) => { if (d?.cover) setDlCoverFill((m) => ({ ...m, [id]: d.cover })); }).catch(() => {});
+  };
+  useEffect(() => {
+    if (tab !== "dl") return;
+    for (const w of dlWorks) if (!w.cover && !dlCoverFill[w.video_id]) fillDlCover(w.video_id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, dlWorks]);
   /** 观看记录里这条的进度（收藏页没有） */
   const progressOf = (id: number) => (tab === "history" ? history.find((h) => h.id === id) : undefined);
 
@@ -141,7 +155,7 @@ export default function Profile({ wide }: { wide: boolean }) {
                       kind: "feed", videoIds: [w.video_id], index: 0, title: w.title, startEp: w.firstEp,
                     })}
                       className="relative rounded-(--r-sm) overflow-hidden bg-s1 elev-1 pressable" style={{ paddingTop: "133%" }}>
-                      <Img src={w.cover} />
+                      <Img src={dlCoverFill[w.video_id] || w.cover} onError={() => fillDlCover(w.video_id)} />
                       <div className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded-full bg-black/65 text-[9.5px] text-white/90 leading-none">
                         已下 {w.eps.length} 集
                       </div>
